@@ -117,6 +117,19 @@ test("semantic tokens: names keep text, detail and clocks are muted, connectors 
 	assert.ok(digest.calls.some(([t, s]) => t === "dim" && s.startsWith("… +6 more")), "the overflow hint recedes");
 });
 
+test("failed worker rows show the useful cause within the width budget", () => {
+	const cause = "Request violates the provider's configurable content policy.";
+	const detail = `[operator · zai/glm-5.4 +dyn(skills)] Provider API error (400): ${JSON.stringify({ detail: cause })}`;
+	const worker: AgentNode = { id: "async:run-1", label: "Oak · zai/glm-5.4", parentId: undefined, status: "failed", kind: "subagent", agent: "operator", model: "zai/glm-5.4", detail };
+	assert.deepEqual(paint([worker], new Set(), 120).rows, [` ✗ ${worker.label}  ${cause}`]);
+	const narrow = paint([worker], new Set(), 40).rows[0]!;
+	assert.match(narrow, /Request violates ?…$/);
+	assert.ok(visibleWidth(narrow) <= 40);
+	const sibling: AgentNode = { id: "async:run-2", label: "Cedar", parentId: undefined, status: "done", kind: "subagent", detail: undefined };
+	assert.deepEqual(paint([sibling, worker], new Set(), 120, undefined, 1).rows, [` ✗ 1 failed: ${worker.label} (${cause})`]);
+	assert.equal(worker.detail, detail);
+});
+
 test("the theme is read at render time: a theme change repaints the same component", () => {
 	let palette = "first";
 	const mutable: WidgetTheme = { fg: (token, text) => `<${palette}:${token}>${text}` };

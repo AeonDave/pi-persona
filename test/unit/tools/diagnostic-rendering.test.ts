@@ -113,3 +113,52 @@ test("delegate's id-only launch fallback says what launched without repeating th
 	const card = text(render(tool, { content: [{ type: "text", text: "Launched." }], details: { runIds: [7, 8], dropped: 1 } }, false, false));
 	assert.equal(card, "launched 7, 8 · 1 task dropped (max children)");
 });
+
+for (const name of ["council", "flow"]) {
+	test(`${name}: provider failures show the reason, keep sibling output, and retain the raw diagnostic on expansion`, () => {
+		const error = '[operator · zai/glm-5.4 +dyn(skills)] API 429 {"error":{"message":"Capacity exhausted","request_id":"req-44"}}';
+		const partial = "Sibling completed the review.";
+		const body = name === "flow" ? `${partial}\n\nFlow failed at phase "lint": ${error}` : partial;
+		const details = { ok: false, error, failureKind: "provider", ...(name === "flow" ? { failedPhase: "lint" } : { body }) };
+		const content = name === "flow" ? `${fenceUntrusted(body)}\n\nFlow failed at phase "lint" (provider): ${JSON.stringify(error)}` : fenceUntrusted(body);
+		const result = { content: [{ type: "text" as const, text: content }], details };
+		const tool = tools().get(name)!;
+		const compact = text(render(tool, result, false, true));
+		assert.match(compact, /Capacity exhausted/);
+		assert.match(compact, /Sibling completed/);
+		assert.match(compact, /expand/);
+		assert.doesNotMatch(compact, /\+dyn|request_id|API 429/);
+		assert.match(text(render(tool, result, true, true)), /req-44/);
+	});
+}
+
+for (const [name, tool] of tools()) {
+	test(`${name}: a native one-line provider rejection has a short cause with the original available on expand`, () => {
+		const diagnostic = 'API 429 {"error":{"message":"Capacity exhausted","request_id":"req-44"}}';
+		const result = { content: [{ type: "text" as const, text: diagnostic }], details: {} };
+		const compact = text(render(tool, result, false, true));
+		assert.match(compact, /Capacity exhausted/);
+		assert.match(compact, /expand/);
+		assert.doesNotMatch(compact, /request_id|API 429/);
+		assert.match(text(render(tool, result, true, true)), /req-44/);
+	});
+}
+
+for (const name of ["flow", "council"]) {
+	test(`${name}: its own host failure line does not repeat the same cause from the heading`, () => {
+		const raw = '[scout · provider/model] API 429 {"message":"Try again later."}';
+		const result = { content: [{ type: "text" as const, text: `${name} failed: ${raw}` }], details: { ok: false, error: raw } };
+		const card = text(render(tools().get(name)!, result, false, true));
+		assert.equal(card.split("Try again later.").length, 2, card);
+		assert.doesNotMatch(card, /\(no (?:output|ruling)\)/);
+		assert.match(card, /expand/);
+	});
+}
+
+test("an expanded multiline worker diagnostic retains only its quoted original", () => {
+	const raw = 'API response {"message":"Capacity exhausted"}\nWorker detail req-74.';
+	const result = { content: [{ type: "text" as const, text: fenceUntrusted(raw) }], details: { ok: false, error: raw } };
+	const expanded = text(render(tools().get("flow")!, result, true, true));
+	assert.match(expanded, /│[^\n]*Worker detail req-74/);
+	assert.equal(expanded.split("req-74").length - 1, 1, expanded);
+});

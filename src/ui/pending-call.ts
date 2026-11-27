@@ -23,7 +23,7 @@ import type { Theme, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 
 /** Pi exports the render context only through the renderer signature. */
-type ToolRenderContext = Parameters<NonNullable<ToolDefinition["renderCall"]>>[2];
+export type ToolRenderContext = Parameters<NonNullable<ToolDefinition["renderCall"]>>[2];
 
 /** pi-tui Loader's default frames and cadence. */
 export const PENDING_CALL_FRAMES: readonly string[] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];

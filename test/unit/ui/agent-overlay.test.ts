@@ -754,6 +754,21 @@ test("composeAgentRow leaves an ordinary row untruncated", () => {
 	assert.ok(row.endsWith("1m 15s"), "the elapsed badge renders untruncated at the end of the row");
 });
 
+test("F9 list shows the failed worker cause before narrowing the row and keeps raw detail available", (t) => {
+	const detail = `[operator · zai/glm-5.4 +dyn(skills)] Provider API error: ${JSON.stringify({ detail: "Connection reset by peer." })}`;
+	const node: AgentNode = { id: "oak", label: "Oak", kind: "subagent", agent: "operator", parentId: undefined, status: "failed", detail };
+	const row = composeAgentRow({ node, depth: 0, selected: false, inner: 45, now: 0, stallMs: 0, theme: THEME });
+	assert.match(row, /Oak {2}Connection rese…$/);
+	assert.ok(visibleWidth(row) <= 45);
+
+	const tree = new AgentTree();
+	tree.add({ id: node.id, label: node.label, status: node.status, detail });
+	const overlay = new AgentOverlay(tree, TUI_STUB, THEME, () => {});
+	t.after(() => overlay.dispose());
+	overlay.handleInput("\n");
+	assert.match(overlay.render(120).join("\n"), /\[operator · zai\/glm-5\.4 \+dyn\(skills\)\] Provider API error/);
+});
+
 function stopAllOverlay(tree: AgentTree, stopped: string[], canStop?: (id: string) => boolean): AgentOverlay {
 	return new AgentOverlay(tree, TUI_STUB, THEME, () => {}, {
 		onStop: (id) => {

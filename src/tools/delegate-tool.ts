@@ -12,8 +12,9 @@ import { END_TURN_NOTE } from "../core/brief.ts";
 import { fenceUntrusted } from "../core/fence.ts";
 import { Text, visibleWidth } from "@earendil-works/pi-tui";
 import { configuredModels } from "../extension/engine.ts";
-import { compactInlineText, compactVisibleLine, MAX_COLLAPSED_CARD_COLUMNS, sanitizeTerminalText } from "../ui/presentation.ts";
-import { compactVisibleText } from "../ui/presentation.ts";
+import { compactDiagnosticPreview } from "../ui/failure-report.ts";
+import { delegateSettlementPreview } from "../ui/delegate-settlement.ts";
+import { compactInlineText, compactVisibleLine, compactVisibleText, MAX_COLLAPSED_CARD_COLUMNS, sanitizeTerminalText } from "../ui/presentation.ts";
 import { createReportBody } from "../ui/report-body.ts";
 import { hiddenLaunchRequestHint, launchRequestLines, readLaunchRequest, snapshotLaunchRequest, type LaunchRequest } from "../ui/launch-request.ts";
 import { effortText, modelEffortText } from "../ui/model-effort.ts";
@@ -573,7 +574,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 		});
 		return {
 			content: [{ type: "text" as const, text: `${buildCompletionReport(runs, fenceUntrusted, { bounded: false })}${dropped}${d.drainBusBlock()}` }],
-			details: ok ? { settledRuns } : failureDetails({ settledRuns }),
+			details: ok ? { settledRuns } : failureDetails({ settledRuns, settlementPreview: delegateSettlementPreview(runs) }),
 			isError: !ok,
 			...toolUsageField(usage),
 		};
@@ -903,7 +904,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 			// Safe: the delegate `execute` above stores `{ runId | runIds, runs, dropped }` (interactive launch)
 			// or nothing (a headless call's report is its text) in `details`; the double cast just narrows
 			// Pi's opaque `details` type to that known shape for rendering.
-			const details = result.details as unknown as { runId?: string; runIds?: string[]; runs?: unknown; dropped?: number } | undefined;
+			const details = result.details as unknown as { runId?: string; runIds?: string[]; runs?: unknown; dropped?: number; settlementPreview?: ReturnType<typeof delegateSettlementPreview> } | undefined;
 			// Native Pi supplies only content/details in result; the host owns the error flag.
 			const isError = context?.isError ?? result.isError;
 			const rejection = renderDelegateRejection(result, { expanded }, theme, context);
@@ -959,7 +960,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 					}).join("\n"), 0, 0);
 				}
 				if (isError) {
-					const preview = compactVisibleText(text, { maxLines: 4, maxLineChars: 100 });
+					const preview = compactDiagnosticPreview(text, { maxLines: 4, maxLineChars: 100 });
 					return new Text(`${theme.fg("error", theme.bold("failed"))}\n${theme.fg("toolOutput", preview.text)}${preview.truncated ? `\n${theme.fg("dim", expandDetailHint(context))}` : ""}`, 0, 0);
 				}
 				const ids = details.runIds?.length ? details.runIds.slice(0, 3) : [details.runId as string];
@@ -969,8 +970,12 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 				return new Text(`${theme.fg("toolTitle", theme.bold("launched "))}${theme.fg("accent", `${ids.join(", ")}${omitted > 0 ? `, +${omitted} more` : ""}`)}${theme.fg("dim", dropped)}`, 0, 0);
 			}
 			if (isError) {
-				const preview = compactVisibleText(text, { maxLines: 4, maxLineChars: 100 });
-				return new Text(`${theme.fg("error", theme.bold("failed"))}\n${theme.fg("toolOutput", preview.text)}${preview.truncated ? `\n${theme.fg("dim", expandDetailHint(context))}` : ""}`, 0, 0);
+				const settled = details?.settlementPreview;
+				const savedPreview = typeof settled?.text === "string" ? settled.text : undefined;
+				const stopped = savedPreview && settled?.status === "stopped";
+				const renderPreview = savedPreview ? compactVisibleText : compactDiagnosticPreview;
+				const preview = renderPreview(savedPreview || text, { maxLines: 4, maxLineChars: 100 });
+				return new Text(`${theme.fg(stopped ? "warning" : "error", theme.bold(stopped ? "stopped" : "failed"))}\n${theme.fg("toolOutput", preview.text)}${savedPreview || preview.truncated ? `\n${theme.fg("dim", expandDetailHint(context))}` : ""}`, 0, 0);
 			}
 			return new Text(theme.fg("toolOutput", compactVisibleText(text, { maxLines: 4, maxLineChars: 100 }).text), 0, 0);
 		},

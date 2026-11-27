@@ -159,6 +159,11 @@ test("timer call card is a compact purpose line, not an argument echo", () => {
 	assert.match(card, /timer arm/);
 	assert.match(card, /status review/);
 	assert.doesNotMatch(card, /very long wake instructions/);
+	const request = { action: "arm", label: "status review", message: "Check the report.\nThen post an update." };
+	const view = (expanded: boolean) => stripVTControlCharacters(tool.renderCall(request, plainTheme, { expanded, keyHint: () => "alt+e to expand" }).render(160).join("\n"));
+	assert.match(view(false), /alt\+e to expand/);
+	assert.doesNotMatch(view(false), /Check the report/);
+	assert.match(view(true), /Check the report\.\s+Then post an update/);
 	assert.doesNotMatch(card, /[{}]/);
 	const cancel = stripVTControlCharacters(tool.renderCall({ action: "cancel", id: "timer-3" }, plainTheme).render(200).join("\n"));
 	assert.match(cancel, /timer cancel timer-3/);

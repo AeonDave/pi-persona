@@ -69,6 +69,10 @@ test("read_result routes pages through the shared literal renderer: bounded prev
 	const value = await tool.execute("id", { ref, limit: 16000 }, new AbortController().signal, undefined, ctx);
 	const before = JSON.stringify(value);
 	const collapsed = renderCard(tool, value, false);
+	assert.ok(collapsed.includes(`UTF-16 [0,${body.length})/${body.length + 2}`));
+	assert.match(collapsed, /truncated/);
+	assert.match(collapsed, /> 😀/);
+	assert.doesNotMatch(collapsed, /"ok"|storedChars|result:12345678/);
 	assert.match(collapsed, /expand/, "detail is hidden, so the expansion hint is present");
 	assert.doesNotMatch(collapsed, /\u001b/);
 	assert.ok(collapsed.split("\n").length <= 5, `collapsed page stays a bounded preview, got ${collapsed.split("\n").length} lines`);
@@ -88,4 +92,34 @@ test("read_result failures carry the literal error heading from the native conte
 	assert.match(collapsed, /^failed/);
 	assert.match(collapsed, /not authorized/);
 	assert.ok(collapsed.split("\n").length <= 6);
+});
+
+test("read_result keeps an empty final page distinct from a truncated archive and replays unknown receipts literally", async () => {
+	const empty = { ...reply, ok: true as const, body: "", offset: reply.storedChars, endOfStoredBody: true };
+	delete empty.nextOffset;
+	const tool = makeReadResultTool({ read: async () => empty });
+	const value = await tool.execute("id", { ref, offset: empty.offset }, undefined, undefined, ctx);
+	const compact = renderCard(tool, JSON.parse(JSON.stringify(value)), false);
+	assert.match(compact, /empty page/);
+	assert.ok(compact.includes(`[${empty.offset},${empty.offset})/${empty.storedChars}`));
+	assert.match(compact, /truncated/);
+	assert.match(renderCard(tool, { ...value, content: [{ type: "text", text: "original saved receipt" }] }, false), /original saved receipt/);
+	const malformed = { ok: true, storedChars: 1, status: "done" };
+	const literal = `${JSON.stringify(malformed)}\n${fenceUntrusted("x")}`;
+	assert.match(renderCard(tool, { details: malformed, content: [{ type: "text", text: literal }] }, false), /storedChars/);
+});
+
+test("read_result uses the wire page metadata rules when replaying saved details", async () => {
+	const tool = makeReadResultTool({ read: async () => reply });
+	const result = await tool.execute("id", { ref }, undefined, undefined, ctx);
+	for (const patch of [
+		{ ref: "unknown ref" }, { extra: true }, { nextOffset: 0 },
+		{ nextOffset: result.details.storedChars, endOfStoredBody: true },
+		{ endOfStoredBody: true }, { truncated: false }, { status: "ok" },
+		{ provenance: "unknown" }, { nextOffset: 17_000, storedChars: 17_100, originalChars: 17_101 },
+	]) {
+		const details = { ...result.details, ...patch };
+		const text = `${JSON.stringify(details)}\n${fenceUntrusted(body)}`;
+		assert.match(renderCard(tool, { details, content: [{ type: "text", text }] }, false), /^\{"ok":true/, JSON.stringify(patch));
+	}
 });

@@ -712,3 +712,37 @@ test("bounded batch and single metadata keep requested effort visible beside lon
 	assert.match(render(h.tool, single, false, 120), /xhigh/);
 	assert.match(render(h.tool, single, true, 240), /xhigh/);
 });
+
+test("the compact headless delegate outcome shows each sibling status and the failed worker's cause", async () => {
+	initTheme("dark");
+	const error = '[operator · zai/glm-5.4 +dyn(skills)] API 429 {"message":"Capacity exhausted","request_id":"req-44"}';
+	const h = register({ buildEngine: () => ({ run: async (spec: any) => ({
+		agent: spec.agent, ok: spec.agent === "scout", output: spec.agent === "scout" ? "Sibling inspected the build." : "",
+		usage: emptyUsage(), ...(spec.agent === "operator" ? { error, failureKind: "provider" } : {}),
+	}) }) });
+	const result = await h.tool.execute("batch", { concurrency: 1, tasks: [
+		{ agent: "scout", name: "Birch", task: "inspect" },
+		{ agent: "operator", name: "Amber", task: "run" },
+	] }, undefined, undefined, { ...ctx(), hasUI: false });
+	assert.equal(result.isError, true);
+	const saved = JSON.parse(JSON.stringify(result));
+	const compact = render(register().tool, saved, false, 180);
+	assert.match(compact, /Amber.*Capacity exhausted/);
+	assert.match(compact, /Birch.*done/);
+	assert.match(compact, /expand/);
+	assert.doesNotMatch(compact, /\+dyn|request_id|API 429/);
+	const expanded = render(register().tool, saved, true, 240);
+	assert.match(expanded, /req-44/);
+	assert.match(expanded, /Sibling inspected the build/);
+});
+
+test("a headless batch stopped by the operator shows stopped in its saved preview", async () => {
+	const h = register({ buildEngine: () => ({ run: async (spec: any) => ({
+		agent: spec.agent, ok: false, output: "", error: "operator cancelled", failureKind: "abort", usage: emptyUsage(),
+	}) }) });
+	const result = await h.tool.execute("one", { agent: "operator", task: "run" }, undefined, undefined, { ...ctx(), hasUI: false });
+	assert.equal(result.isError, true);
+	const compact = render(register().tool, JSON.parse(JSON.stringify(result)), false, 140);
+	assert.match(compact, /^stopped/);
+	assert.doesNotMatch(compact, /failed/);
+});

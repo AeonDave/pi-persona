@@ -6,6 +6,7 @@ import type { ThinkingLevel } from "../core/types.ts";
 import { fenceUntrusted, stripTerminalControls } from "../core/fence.ts";
 import { neutralizeMonitorUnicode } from "../core/monitor-output.ts";
 import { MONITOR_LOG_ENTRY, SCRIPT_LOG_ENTRY, parseMonitorLogRecord, type MonitorLogRecord } from "../monitor/archive.ts";
+import { projectFailureReport } from "./failure-report.ts";
 import { summarizeFailure } from "./failure-summary.ts";
 import { compactInlineText, compactVisibleText, sanitizeTerminalText } from "./presentation.ts";
 import { modelEffortText } from "./model-effort.ts";
@@ -363,7 +364,7 @@ export function registerSessionCards(pi: Pick<ExtensionAPI, "registerMessageRend
 		return sessionCard({
 			title: `failed · ${compactInlineText(data.label || data.agent, { maxChars: 80 })}`, state: "error", metadata,
 			full: `Run ${compactInlineText(data.id)}${modelLine ? `\nModel: ${modelLine}` : ""}\n${sanitizeTerminalText(data.error)}`,
-			preview: (width) => ({ text: compactVisibleText(summarizeFailure(data.error), { maxLines: 2, maxLineChars: Math.min(width, 100) }).text, truncated: true }),
+			preview: (width) => ({ text: compactVisibleText(summarizeFailure(data.error, data.agent), { maxLines: 2, maxLineChars: Math.min(width, 100) }).text, truncated: true }),
 		}, expanded, theme, options.getOutputPad(), keyHint, entry);
 	});
 	pi.registerEntryRenderer<ResultEntry>("pi-persona-result", (entry, { expanded, keyHint }, theme) => {
@@ -373,11 +374,16 @@ export function registerSessionCards(pi: Pick<ExtensionAPI, "registerMessageRend
 		const stopped = data.ok !== true && typeof data.stoppedAtGate === "string";
 		const state: State = stopped ? "attention" : data.ok === true ? "success" : data.ok === false ? "error" : "neutral";
 		const status = stopped ? `stopped · checkpoint ${compactInlineText(data.stoppedAtGate ?? "", { maxChars: 32 })}` : data.ok === true ? "complete" : data.ok === false ? "failed" : "unknown";
-		const cause = compactVisibleText([data.failureKind, data.error].filter(Boolean).join(" · "), { maxLines: 1, maxLineChars: 80 }).text;
+		const report = projectFailureReport(full, state === "error" ? data.error : undefined);
+		const cause = compactVisibleText([data.failureKind, report.cause].filter(Boolean).join(" · "), { maxLines: 1, maxLineChars: 80 }).text;
 		const label = compactInlineText(data.label ?? "", { maxChars: 96 });
 		return sessionCard({
 			title: `${label || "result"} · ${status}${state === "error" && cause !== "(no output)" ? ` · ${cause}` : ""}`,
-			state, full, markdown: true, preview: preview(full, 3, 100),
+			state, full: report.fullBody, markdown: true, preview: (width) => {
+				if (!report.compactBody) return { text: "", truncated: true };
+				const body = preview(report.compactBody, 3, 100)(width);
+				return { ...body, truncated: body.truncated || report.hiddenDiagnostic };
+			},
 		}, expanded, theme, options.getOutputPad(), keyHint, entry);
 	});
 	pi.registerEntryRenderer<ContentEntry>("pi-persona-nudge", (entry, { expanded, keyHint }, theme) => {

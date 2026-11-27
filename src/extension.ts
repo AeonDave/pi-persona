@@ -249,7 +249,7 @@ export function announceAsyncRunSettlement(
 		// TUI card, or the sanitized error toast when no card can be presented — because it deserves
 		// attention even while the supervisor stays busy.
 		if (run.status === "failed") {
-			const toast = () => notify?.(`async run ${id} (${agent}) failed: ${summarizeFailure(run.error ?? "(no detail)")}`, "error");
+			const toast = () => notify?.(`async run ${id} (${agent}) failed: ${summarizeFailure(run.error ?? "(no detail)", run.agent)}`, "error");
 			if (presentFailure) {
 				try { presentFailure(run); }
 				catch { toast(); }

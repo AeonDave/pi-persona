@@ -29,7 +29,7 @@ import {
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 
-import { type AgentNode, type AgentTree, type FlatRow, deriveWaitingNodeIds, effortTag, isWakeSource, isNonAgentNode, nodeGlyph, runningAnnotation, thinkingDetailLine } from "./agent-tree.ts";
+import { type AgentNode, type AgentTree, type FlatRow, compactNodeDetail, deriveWaitingNodeIds, effortTag, isWakeSource, isNonAgentNode, nodeGlyph, runningAnnotation, thinkingDetailLine } from "./agent-tree.ts";
 import { LiveClock } from "./live-clock.ts";
 import { inspectorFrame } from "./inspector-frame.ts";
 import { cumulativeUsageLine, groupLegBrief, groupLegMetadata, groupLegStatus, isAgentGroup, projectAgentGroup } from "./agent-group.ts";
@@ -83,7 +83,7 @@ export function composeAgentRow(input: AgentRowInput): string {
 	const labelMax = Math.max(8, Math.floor(avail * 0.62) - visibleWidth(effort));
 	const label = (safeInline(node.label, labelMax) || "agent") + effort;
 	const detailMax = node.detail ? Math.max(0, avail - labelMax - 2) : 0;
-	const detail = detailMax > 0 ? safeInline(node.detail ?? "", detailMax) : "";
+	const detail = detailMax > 0 ? compactNodeDetail(node, detailMax) : "";
 	const detailText = detail ? t.fg("dim", `  ${detail}`) : "";
 
 	const labelLine = `${indent}${nodeGlyph(node)} ${label}`;

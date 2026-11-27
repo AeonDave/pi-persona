@@ -228,7 +228,8 @@ test("a qualified target keeps routing to its session after the peer changes cal
 		assert.ok(renamed, "the roster shows the current human-readable call-sign");
 		assert.notEqual(renamed.target, beforeRename.target, "the display token reflects the renamed label");
 		assert.equal(sender.resolvePeer(beforeRename.target).session_id, beforeRename.session_id);
-		await sender.send(beforeRename.target, "still reaches the original session");
+		const receipt = await sender.send(beforeRename.target, "still reaches the original session");
+		assert.equal(receipt.displayName, "second-call-sign");
 		await waitUntil(() => inbox.length >= 1, "the original session receives the message");
 		assert.equal(inbox.length, 1);
 		assert.equal(inbox[0]?.text, "still reaches the original session");

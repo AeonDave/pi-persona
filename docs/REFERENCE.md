@@ -1031,6 +1031,10 @@ retain attention counts for failed, waiting and stalled descendants. Exocom deta
 are read-only. `script` supports `run` (executable + literal `args`, or inline shell `code`), `list`,
 `stop` and `result`; see [background programs](MONITORS.md#background-programs).
 
+In the conversation, expand a `timer arm`, `monitor arm` or `script run` call to read the reminder,
+executable and literal arguments, or inline script. Failed workers show their cause in the widget
+and F9. Expand the failure card for the original diagnostic.
+
 **Commands** — `/persona [name|off|list|reload|seed|restore|models [council-persona]]` ·
 `/persona-settings [show]` · `/models [query]` · `/orchestrate <task>` · `/flow <name> <task>` ·
 `/peek [id]` · `/exocom` · `/doctor`.

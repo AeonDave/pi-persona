@@ -7,7 +7,7 @@ import { Text } from "@earendil-works/pi-tui";
 import { renderPendingCall } from "../ui/pending-call.ts";
 import { compactInlineText, sanitizeTerminalText } from "../ui/presentation.ts";
 import { compactVisibleText } from "../ui/presentation.ts";
-import { renderLiteralToolResult } from "../ui/literal-tool-result.ts";
+import { renderLiteralPreview, renderLiteralToolResult } from "../ui/literal-tool-result.ts";
 import { createReportBody } from "../ui/report-body.ts";
 import { buildCommunicationCardDetails, communicationPreview, parseCommunicationCardDetails } from "../ui/communication-card.ts";
 import { buildRunLabelDetails, parseRunLabelDetails } from "../ui/run-labels.ts";
@@ -383,7 +383,10 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 			else if (["result", "steer", "stop"].includes(action)) target = runTarget ?? "?";
 			else if (action === "send") target = runTarget ?? "?";
 			else if (action === "message") target = compactInlineText(args.messageId ?? "?", { maxChars: 80 }) || "?";
-			else if (action === "reply") target = compactInlineText(args.askId ?? "?", { maxChars: 80 }) || "?";
+			else if (action === "reply") {
+				const savedTarget = state?.target;
+				target = savedTarget && savedTarget.id === args.askId ? savedTarget.label : compactInlineText(args.askId ?? "?", { maxChars: 80 }) || "?";
+			}
 			const formatCall = (label: string) => `${theme.fg("toolTitle", theme.bold("intercom "))}${theme.fg("accent", action)}${label ? theme.fg("dim", ` ${compactInlineText(label, { maxChars: 80 })}`) : ""}`;
 			const component = new Text(formatCall(target), 0, 0);
 			if (state) { state.callText = component; state.formatCall = formatCall; }
@@ -391,14 +394,14 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 		},
 		renderResult(result, { expanded }, theme, context) {
 			const details = (result.details ?? {}) as {
-				action?: string; ok?: boolean; runId?: string; busId?: string; target?: string; message?: string; sentMessage?: string; modelUsed?: string;
+				action?: string; ok?: boolean; runId?: string; busId?: string; askId?: string; target?: string; message?: string; sentMessage?: string; modelUsed?: string;
 				results?: Array<{ truncated?: boolean }>;
 				summary?: { ref?: string; storage?: string; storedChars?: number; truncated?: boolean; error?: string };
 				offset?: number; nextCursor?: number; nextOffset?: number; warnings?: readonly string[];
 			};
 			const state = context?.state as IntercomRenderState | undefined;
 			const action = details.action ?? context?.args?.action;
-			const savedId = details.busId ?? details.runId ?? context?.args?.to;
+			const savedId = action === "reply" ? details.askId ?? context?.args?.askId : details.busId ?? details.runId ?? context?.args?.to;
 			const legacyCompleted = !details.target && context !== undefined && context.isPartial !== true
 				&& ["steer", "stop", "result", "peek", "send"].includes(action ?? "");
 			if (state && typeof savedId === "string" && (details.target || legacyCompleted)) {
@@ -432,25 +435,32 @@ export function registerIntercomTool(pi: ExtensionAPI, d: IntercomToolDeps): voi
 					return new Text(`${theme.fg("toolOutput", compact.text)}\n${theme.fg("dim", expandDetailHint(context))}`, 0, 0);
 				}
 			}
-			if (!failed && (details.action === "steer" || details.action === "send") && details.ok === true) {
-				const sending = details.action === "send";
+			if (!failed && (action === "steer" || action === "send" || action === "reply") && details.ok === true) {
+				const replying = action === "reply";
+				const steering = action === "steer";
 				const target = compactInlineText(details.target ?? state?.target?.label ?? (legacyCompleted && typeof savedId === "string" ? sanitizeDisplayLabel(savedId, "run") : details.runId ? displayRunTarget(details.runId) : ""), { maxChars: 80 });
-				const savedMessage = sending ? details.sentMessage : details.message;
+				const savedMessage = steering ? details.message : details.sentMessage;
 				const message = typeof savedMessage === "string" ? savedMessage : context?.args?.message;
-				// Old persisted receipts may predate message snapshots. Keep their original content
-				// available in expansion rather than fabricating a message that was never recorded.
+				const receipt = replying ? `Replied${target ? ` to ${target}` : ""}`
+					: steering ? `Steering queued${target ? ` for ${target}` : ""}` : `Sent${target ? ` to ${target}` : ""}`;
+				const askId = replying && typeof savedId === "string" ? sanitizeDisplayLabel(savedId, "ask") : undefined;
 				if (expanded) {
-					const text = typeof message === "string"
-						? `${sending ? `Sent${target ? ` to ${target}` : ""}` : `Steering queued${target ? ` for ${target}` : ""}`}.${details.busId ? `\nBus handle: ${sanitizeDisplayLabel(details.busId, "peer")}` : details.runId ? `\nRun: ${sanitizeDisplayLabel(details.runId, "run")}` : ""}\n\n${sanitizeTerminalText(message)}`
-						: full;
+					const diagnostics = [
+						...(askId ? [`Ask: ${askId}`] : []),
+						...(details.busId ? [`Bus handle: ${sanitizeDisplayLabel(details.busId, "peer")}`] : []),
+						...(details.runId ? [`Run: ${sanitizeDisplayLabel(details.runId, "run")}`] : []),
+					];
+					const text = typeof message === "string" ? [`${receipt}.`, ...diagnostics, "", sanitizeTerminalText(message)].join("\n") : full;
 					return new Text(theme.fg("toolOutput", text), 0, 0);
 				}
-				const title = compactInlineText(`${sending ? "message sent" : "steering queued"}${target ? ` · ${target}` : ""}`, { maxChars: 100 });
-				const preview = typeof message === "string" ? compactVisibleText(message, { maxLines: 3, maxLineChars: 100 }) : undefined;
-				// Native Pi already rendered `intercom steer <alias>` above this result. Show the
-				// instruction directly there; only standalone/older renderers need another identity row.
-				const showTitle = !state?.callText || !preview;
-				return new Text(`${showTitle ? theme.fg("success", title) : ""}${preview ? `${showTitle ? "\n" : ""}${theme.fg("toolOutput", preview.text)}${preview.truncated || sending ? `\n${theme.fg("dim", expandDetailHint(context))}` : ""}` : ""}`, 0, 0);
+				const title = compactInlineText(`${replying ? "reply sent" : steering ? "steering queued" : "message sent"}${target ? ` · ${target}` : ""}`, { maxChars: 100 });
+				if (typeof message !== "string") return new Text(theme.fg("success", title), 0, 0);
+				// The native call row already identifies the action and target of the outgoing message.
+				return renderLiteralPreview(message, theme, context, {
+					...(state?.callText ? {} : { heading: theme.fg("success", title) }),
+					maxLines: 3,
+					hasDetails: Boolean(askId || details.busId || details.runId),
+				});
 			}
 			// Archive views are listings/diagnostics, never Markdown reports. A successful archive
 			// read carries no runId (live results do) and a summary (its own receipt); the invalid

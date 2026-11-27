@@ -1,5 +1,5 @@
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { type AgentNode, effortTag, isNonAgentNode, isQueuedMarker } from "./agent-tree.ts";
+import { type AgentNode, compactNodeDetail, effortTag, isNonAgentNode, isQueuedMarker } from "./agent-tree.ts";
 import { compactInlineText } from "./presentation.ts";
 import { formatUsage } from "./usage.ts";
 import { isResourceGroup } from "./resource-groups.ts";
@@ -61,9 +61,9 @@ export function projectAgentGroup(nodes: readonly AgentNode[], rootId: string, w
 export function groupLegBrief(node: AgentNode): string {
 	const detail = node.usage && node.detail === formatUsage(node.usage) ? undefined : node.detail;
 	if (node.status === "running") return `activity: ${compactInlineText(detail || "working…", { maxChars: 240 })}`;
+	if (node.status === "failed" && detail) return `result: ${compactNodeDetail(node, 240)}`;
 	const excerpt = node.output?.slice(0, 4096).trimStart().split(/\n\s*\n/, 1)[0]?.split("\n").filter((line) => line.trim()).slice(0, 2).join(" ");
-	const brief = node.status === "failed" && detail ? detail : excerpt || detail || "(no output retained)";
-	return `result: ${compactInlineText(brief, { maxChars: 240 })}`;
+	return `result: ${compactInlineText(excerpt || detail || "(no output retained)", { maxChars: 240 })}`;
 }
 
 export function groupLegMetadata(node: AgentNode, columns: number): string {

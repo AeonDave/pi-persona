@@ -13,6 +13,7 @@ import { resolveCouncilInvocation } from "../persona/persona.ts";
 import type { OrchestrationGrammar, Persona } from "../persona/persona.ts";
 import type { PersonaController } from "../persona/controller.ts";
 import { Text } from "@earendil-works/pi-tui";
+import { compactDiagnosticPreview, projectFailureReport } from "../ui/failure-report.ts";
 import { renderPendingCall } from "../ui/pending-call.ts";
 import { createReportBody } from "../ui/report-body.ts";
 import { orchestrationLaunchLines, withOrchestrationRequest, type OrchestrationLaunchSnapshot } from "../ui/orchestration-launch.ts";
@@ -266,17 +267,19 @@ ${strategyCatalog()}`,
 			const body = sanitizeTerminalText(d.body || (first && first.type === "text" ? first.text : ""));
 			const metadata = d.launch ? `\n\nLaunch request (Pi may clamp effort):\n${orchestrationLaunchLines(d.launch, expanded, context).join("\n")}` : "";
 			if (failed) {
-				const cause = compactInlineText([d.failureKind, d.error].filter((part): part is string => !!part).join(" · "), { maxChars: 160 });
+				const report = projectFailureReport(body, d.error, "council");
+				const cause = compactInlineText([d.failureKind, report.cause].filter((part): part is string => !!part).join(" · "), { maxChars: 160 });
 				// The call line above already says "council"; the heading carries only the outcome.
 				const title = () => theme.fg("error", theme.bold(`failed${cause ? ` · ${cause}` : ""}`));
 				if (expanded) {
 					// Only a completed council retains a ruling body; preflight/host errors are literal.
-					if (typeof d.body === "string") return createReportBody(body || "(no ruling)", theme, { header: title, footer: metadata }, context?.lastComponent);
-					return new Text(`${title()}\n${theme.fg("toolOutput", body || "(no ruling)")}${theme.fg("dim", metadata)}`, 0, 0);
+					if (typeof d.body === "string") return createReportBody(report.fullBody || "(no ruling)", theme, { header: title, footer: metadata }, context?.lastComponent);
+					return new Text(`${title()}\n${theme.fg("toolOutput", report.fullBody || "(no ruling)")}${theme.fg("dim", metadata)}`, 0, 0);
 				}
-				const preview = compactVisibleText(body || "(no ruling)", { maxLines: 3, maxLineChars: 100 });
-				const hint = preview.truncated ? `\n${theme.fg("dim", expandDetailHint(context))}` : "";
-				return new Text(`${title()}\n${theme.fg("toolOutput", preview.text)}${hint}${theme.fg("dim", metadata)}`, 0, 0);
+				const renderPreview = d.error || typeof d.body === "string" ? compactVisibleText : compactDiagnosticPreview;
+				const preview = renderPreview(report.compactBody, { maxLines: 3, maxLineChars: 100 });
+				const hint = preview.truncated || report.hiddenDiagnostic ? `\n${theme.fg("dim", expandDetailHint(context))}` : "";
+				return new Text(`${title()}${report.compactBody ? `\n${theme.fg("toolOutput", preview.text)}` : ""}${hint}${theme.fg("dim", metadata)}`, 0, 0);
 			}
 			const text = formatCouncilResult(
 				{ headline: d.headline, status: d.status, tally: d.tally, usedFallback: d.usedFallback, body },

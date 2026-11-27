@@ -30,6 +30,7 @@ import { normalizeExocomProfile, type ExocomProfile } from "../exocom/profile.ts
 import { normalizeMetadataText, normalizePeerName } from "../exocom/registry.ts";
 import type { ExocomScope } from "../exocom/scope.ts";
 import { compactInlineText } from "../ui/presentation.ts";
+import { renderOutgoingMessageReceipt } from "../ui/outgoing-message.ts";
 import { modelEffortText } from "../ui/model-effort.ts";
 import { isThinkingLevel } from "../core/types.ts";
 
@@ -69,7 +70,7 @@ const ExocomNameParams = Type.Object({
  *  return type is spelled out explicitly instead of leaving it to per-branch inference (which
  *  otherwise unifies the two into an ill-typed merged shape). */
 type ExocomSendDetails =
-	| { msg_id: string; target: string }
+	| { msg_id: string; target: string; displayName?: string }
 	| {
 		target: "*";
 		/** The bounded samples below are accompanied by exact totals so a large fan-out never
@@ -448,9 +449,9 @@ export function registerExocomTools(
 				};
 			}
 
-			let msg_id: string;
+			let receipt: Awaited<ReturnType<ExocomPlane["send"]>>;
 			try {
-				({ msg_id } = await plane.send(params.target, params.message, params.in_reply_to));
+				receipt = await plane.send(params.target, params.message, params.in_reply_to);
 			} catch (err) {
 				// pi turns a thrown execute() into model-facing tool-result text, so a refusal carrying
 				// the PEER's own NACK prose would land in the supervisor's context as this agent's own
@@ -459,19 +460,19 @@ export function registerExocomTools(
 				const quoted = err instanceof ExocomPeerRejection ? fencedPeerReasons([{ target: params.target, reason: err.reason }]) : "";
 				throw new Error([refusalLine(params.target, err), quoted].filter(Boolean).join("\n"));
 			}
+			const { msg_id, displayName } = receipt;
 			return {
 				content: [{ type: "text", text: `✓ queued to ${params.target} · msg_id=${msg_id}` }],
-				details: { msg_id, target: params.target },
+				details: { msg_id, target: params.target, ...(displayName ? { displayName } : {}) },
 			};
 		},
 		renderCall(args, theme, context) {
 			const pending = renderPendingCall("exocom send", theme, context);
 			if (pending) return pending;
+			const title = theme.fg("toolTitle", theme.bold("exocom send"));
+			if (context?.isPartial === false && !context.isError) return new Text(title, 0, 0);
 			const target = normalizeMetadataText(args.target, 80, "*");
-			const message = String(args.message ?? "").replace(/\s+/g, " ").trim();
-			const preview = normalizeMetadataText(message, 60);
-			const suffix = preview.length < message.length ? "…" : "";
-			return new Text(`${theme.fg("toolTitle", theme.bold("exocom send "))}${theme.fg("accent", target)}${preview ? theme.fg("dim", ` ${preview}${suffix}`) : ""}`, 0, 0);
+			return new Text(`${title} ${theme.fg("accent", target)}`, 0, 0);
 		},
 		renderResult(result, { expanded }, theme, context) {
 			const details = result.details as unknown as ExocomSendDetails | undefined;
@@ -480,7 +481,19 @@ export function registerExocomTools(
 			if (context?.isError || !isSendDetails(details)) {
 				return renderLiteralToolResult(result, { expanded }, theme, { ...context, isError: true });
 			}
-			return renderLiteralToolResult({ ...result, content: [{ type: "text", text: renderSendResult(details) }] }, { expanded }, theme, context);
+			const receipt = renderSendResult(details);
+			// Pi persists the call arguments in the same transcript as the receipt. A spill can be
+			// large, so reuse that body for expansion without storing a second copy of it in details.
+			const message = context?.args?.message;
+			const broadcast = "failed" in details;
+			if (typeof message !== "string" || (broadcast && (details.queuedCount ?? details.msg_ids.length) === 0)) {
+				return renderLiteralToolResult({ ...result, content: [{ type: "text", text: receipt }] }, { expanded }, theme, context);
+			}
+			const target = broadcast ? undefined : normalizeMetadataText(details.displayName ?? details.target, 80, "peer");
+			const destination = target && !broadcast && target !== details.target ? `\nPeer: ${target}` : "";
+			const replyTo = typeof context?.args?.in_reply_to === "string" ? `\nIn reply to: ${normalizeMetadataText(context.args.in_reply_to, 128)}` : "";
+			const summary = target ? `queued to ${target}` : receipt.split("\n", 1)[0]!;
+			return renderOutgoingMessageReceipt(message, { compact: summary, full: `${receipt}${destination}${replyTo}` }, { expanded }, theme, context);
 		},
 	});
 

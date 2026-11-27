@@ -6,6 +6,14 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ## [Unreleased]
 
+- Failed worker rows and F9 show the cause beside the worker's name. Expand a failure card for the
+  original engine diagnostic. Failed councils, flows and delegate batches keep partial results
+  available, and operator-stopped batches are labelled `stopped`.
+- Expand a timer, monitor or script launch to read its reminder, command arguments or inline code.
+  Model searches with results show the configured expansion key. Granted result pages show their
+  range, truncation status and a quoted excerpt before the full protocol receipt.
+- Intercom replies identify the asking worker. Exocom message cards let you read the full outgoing
+  message, question, answer or reason for declining. Batched updates keep each sender with its text.
 - Persona now requires Pi 1.6.1. Terminals that display Pi's program status show a flow's
   Approve/Reject checkpoint as a permission request.
 

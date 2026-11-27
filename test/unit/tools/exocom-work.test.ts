@@ -245,6 +245,29 @@ test("work receipts omit expansion hints when the complete payload fits", async 
 	assert.equal(card, result.content[0].text);
 });
 
+for (const [name, field] of [["exocom_ask", "question"], ["exocom_answer", "evidence"], ["exocom_decline", "reason"]] as const) {
+	test(`${name} previews and expands the submitted ${field} from the native tool call`, async () => {
+		const h = harness({ dispatch: async (frame) => ({ msg_id: frame.msg_id, peerWakeDeferred: true }) });
+		const tool = h.tools.get(name);
+		const message = "### Opening line\n" + "The exact work detail.\n".repeat(8) + "Last line of the accepted text.";
+		const args = { work_key: "review-auth", ask_id: "ask-9", target: "vega", ok: true, [field]: message };
+		const result = await tool.execute("outgoing", args);
+		const context = { args, isError: false, keyHint: () => "ctrl+o to expand" };
+		const render = (expanded: boolean) => tool.renderResult(result, { expanded }, plainTheme, context).render(100)
+			.map((line: string) => stripVTControlCharacters(line).trimEnd()).join("\n");
+		const preview = render(false);
+		assert.match(preview, /peer wake deferred/);
+		assert.match(preview, /### Opening line/);
+		assert.match(preview, /ctrl\+o to expand/);
+		assert.doesNotMatch(preview, /msg_id=|Last line/);
+		const expanded = render(true);
+		assert.match(expanded, /msg_id=/);
+		assert.equal(expanded.split("The exact work detail.").length - 1, 8);
+		assert.match(expanded, /Last line of the accepted text/);
+		assert.doesNotMatch(JSON.stringify(result), /Last line of the accepted text/);
+	});
+}
+
 test("every work-tool renderer marks native host failures as errors", async (t) => {
 	const h = harness();
 	const theme = {

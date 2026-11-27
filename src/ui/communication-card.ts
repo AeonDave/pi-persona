@@ -1,4 +1,5 @@
-import { compactInlineText, compactVisibleText, sanitizeTerminalText } from "./presentation.ts";
+import { sliceByColumn, visibleWidth } from "@earendil-works/pi-tui";
+import { compactInlineText, sanitizeTerminalText } from "./presentation.ts";
 import { neutralizeMonitorUnicode } from "../core/monitor-output.ts";
 
 export type CommunicationPlane = "intercom" | "exocom";
@@ -47,18 +48,30 @@ export function parseCommunicationCardDetails(value: unknown): CommunicationCard
 	return parsed;
 }
 
-function formatCommunicationCard(card: CommunicationCard): string {
-	const messages = card.messages.map((message) => {
-		const text = compactInlineText(neutralizeMonitorUnicode(message.text), { maxChars: 100 });
-		if (!message.from) return text;
-		return `from ${message.from}:\n${text}`;
-	});
-	return [...messages, ...(card.omitted ? [`… ${card.omitted} more message${card.omitted === 1 ? "" : "s"}`] : []), ...(card.truncated ? ["… message text truncated; expand for the delivered source"] : [])].join("\n\n");
-}
-
 export function communicationPreview(card: CommunicationCard, width: number): { text: string; truncated: boolean } {
-	const overflow = Boolean(card.omitted || card.truncated);
-	const result = compactVisibleText(formatCommunicationCard(card), { maxLines: overflow ? 3 : 4, maxLineChars: Math.min(width, 100) });
-	const flattened = card.messages.some((message) => compactInlineText(neutralizeMonitorUnicode(message.text), { maxChars: 100 }) !== message.text);
-	return { text: `${result.text}${overflow ? "\n… source limited; expand" : ""}`, truncated: result.truncated || overflow || flattened };
+	const limited = Boolean(card.omitted || card.truncated);
+	const rowLimit = limited ? 3 : 4;
+	const columns = Math.max(1, Math.min(width, 100));
+	const rows: string[] = [];
+	let shown = 0;
+	let truncated = limited;
+	for (const message of card.messages) {
+		const body = compactInlineText(neutralizeMonitorUnicode(message.text), { maxChars: 100 });
+		// Keep each sender beside its own preview. Indent the literal body so even text that
+		// begins with "from …" cannot be mistaken for another sender line.
+		const lines = message.from ? [`from ${message.from}:`, `  ${body || "(empty message)"}`] : [body];
+		if (rows.length + lines.length > rowLimit) break;
+		rows.push(...lines);
+		truncated ||= body !== message.text;
+		shown++;
+	}
+	const remaining = card.messages.length - shown + (card.omitted ?? 0);
+	if (limited) rows.push("… preview limited");
+	else if (remaining && rows.length < rowLimit) rows.push(`… +${remaining} more message${remaining === 1 ? "" : "s"}`);
+	const text = rows.map((row) => {
+		if (visibleWidth(row) <= columns) return row;
+		truncated = true;
+		return `${sliceByColumn(row, 0, columns - 1, true)}…`;
+	}).join("\n");
+	return { text, truncated: truncated || remaining > 0 };
 }

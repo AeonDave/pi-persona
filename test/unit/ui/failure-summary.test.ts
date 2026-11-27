@@ -25,6 +25,13 @@ test("JSON scanning handles quoted braces, escaped quotes, and trailing diagnost
 	assert.equal(summarizeFailure(`Provider rejected request: ${JSON.stringify({ detail })}\nrequest id: trace-123`), detail);
 });
 
+test("a secondary provider error cannot replace the engine's terminal cause", () => {
+	const error = '[operator · zai/glm-5.4] agent exceeded the 30000ms hard cap (last error: 429 {"error":{"message":"Try again later"}})';
+	assert.equal(summarizeFailure(error, "operator"), "agent exceeded the 30000ms hard cap");
+	const message = "Request refused (last error: invalid credentials)";
+	assert.equal(summarizeFailure(`agent provider returned ${JSON.stringify({ message })}`), message);
+});
+
 test("credit failures keep their provider cause instead of becoming unsupported-model claims", () => {
 	const message = "This request requires more credits, or fewer max_tokens.";
 	assert.equal(summarizeFailure(`[research · openrouter/provider/model] 402 ${JSON.stringify({ error: { message, code: 402 } })}`), message);
@@ -34,7 +41,13 @@ test("credit failures keep their provider cause instead of becoming unsupported-
 test("plain provider failures remain faithful and only the runtime identity wrapper is omitted", () => {
 	assert.equal(summarizeFailure("Provider error: authentication rejected."), "Provider error: authentication rejected.");
 	assert.equal(summarizeFailure("[scout · provider/model] Connection reset by peer."), "Connection reset by peer.");
+	assert.equal(summarizeFailure("[scout · bare-model] Connection reset by peer.", "scout"), "Connection reset by peer.");
+	assert.equal(summarizeFailure("[scout · (no model)] Connection reset by peer.", "scout"), "Connection reset by peer.");
+	assert.equal(summarizeFailure("[scout · provider/model +dyn(model,skills,tools)] Connection reset by peer.", "scout"), "Connection reset by peer.");
 	assert.equal(summarizeFailure("[BLOCKED] Provider refused the request."), "[BLOCKED] Provider refused the request.");
+	assert.equal(summarizeFailure("[retry · on cooldown] Provider refused the request."), "[retry · on cooldown] Provider refused the request.");
+	assert.equal(summarizeFailure("[provider · unavailable] Connection refused."), "[provider · unavailable] Connection refused.");
+	assert.equal(summarizeFailure("[provider · unauthorized/account] Connection refused.", "scout"), "[provider · unauthorized/account] Connection refused.");
 	assert.equal(summarizeFailure("Model unsupported by this provider."), "Model unsupported by this provider.");
 });
 

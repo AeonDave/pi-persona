@@ -199,6 +199,30 @@ test("exocom short receipts do not advertise expansion when no detail is hidden"
 	assert.match(expanded, /msg_id=to-dev/);
 });
 
+test("exocom send previews the accepted message and expands the native call body and routing receipt", async () => {
+	const m = mockPi();
+	registerExocomTools(m.pi, () => stubPlane({ send: async () => ({ msg_id: "accepted-42", displayName: "Dewglass#2" }) }) as never);
+	const tool = m.tools.get("exocom_send");
+	const target = "former-name@0123456789abcdef01234567";
+	const message = "Follow up on the release.\n" + "Details stay literal.\n".repeat(10) + "Last line of the accepted message.";
+	const args = { target, message };
+	const result = await tool.execute("c", args, undefined, undefined, {});
+	const context = { args, isPartial: false, keyHint: () => "ctrl+o to expand" };
+	const render = (component: { render(width: number): string[] }) => component.render(80).map((line) => stripVTControlCharacters(line).trimEnd()).join("\n");
+	const collapsed = render(tool.renderCall(args, plainTheme, context)) + "\n" + render(tool.renderResult(result, { expanded: false }, plainTheme, context));
+	assert.match(collapsed, /queued to Dewglass#2/);
+	assert.match(collapsed, /Follow up on the release/);
+	assert.match(collapsed, /ctrl\+o to expand/);
+	assert.doesNotMatch(collapsed, /former-name|accepted-42|Last line/);
+	const expanded = render(tool.renderResult(result, { expanded: true }, plainTheme, { ...context, expanded: true }));
+	assert.match(expanded, /Dewglass#2/);
+	assert.match(expanded, /former-name@0123456789abcdef01234567/);
+	assert.match(expanded, /msg_id=accepted-42/);
+	assert.equal(expanded.split("Details stay literal.").length - 1, 10);
+	assert.match(expanded, /Last line of the accepted message/);
+	assert.doesNotMatch(JSON.stringify(result), /Last line of the accepted message/, "Pi already persists the body in tool call arguments");
+});
+
 test("exocom_send target:'*' broadcasts to every peer, best-effort (one failure doesn't abort the rest)", async () => {
 	const m = mockPi();
 	const sent: string[] = [];

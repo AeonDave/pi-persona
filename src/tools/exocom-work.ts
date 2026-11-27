@@ -5,7 +5,7 @@
 import { randomUUID } from "node:crypto";
 import { type Static, Type } from "typebox";
 
-import { type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { renderPendingCall } from "../ui/pending-call.ts";
 
@@ -17,6 +17,7 @@ import type { ExocomSemanticFrame } from "../exocom/envelope.ts";
 import { EXOCOM_WAIT_MAX_MS, waitTimeoutMs } from "../exocom/wait.ts";
 import { normalizeMetadataText } from "../exocom/registry.ts";
 import { renderLiteralToolResult } from "../ui/literal-tool-result.ts";
+import { renderOutgoingMessageReceipt } from "../ui/outgoing-message.ts";
 import { createReportBody } from "../ui/report-body.ts";
 
 const TOKEN = { minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9._:-]+$" } as const;
@@ -93,6 +94,21 @@ function result(text: string, details: Record<string, unknown>) {
 	return { content: [{ type: "text" as const, text }], details };
 }
 
+function renderWorkMessage(field: "question" | "evidence" | "reason", summary: string): NonNullable<ToolDefinition["renderResult"]> {
+	return (result, options, theme, context) => {
+		const args = context?.args as Partial<Record<typeof field, unknown>> | undefined;
+		const message = args?.[field];
+		const details = result.details as { msg_id?: unknown; ok?: unknown; peerWakeDeferred?: unknown } | undefined;
+		if (typeof message !== "string" || (context?.isError ?? result.isError) || typeof details?.msg_id !== "string") {
+			return renderLiteralToolResult(result, options, theme, context);
+		}
+		const full = result.content.filter((part) => part.type === "text").map((part) => part.text).join("\n");
+		const outcome = field === "evidence" && details.ok === false ? "negative answer recorded" : summary;
+		const compact = details.peerWakeDeferred === true ? `${outcome} · peer wake deferred` : outcome;
+		return renderOutgoingMessageReceipt(message, { compact, full }, options, theme, context);
+	};
+}
+
 export function registerExocomWorkTools(pi: ExtensionAPI, deps: ExocomWorkDeps): void {
 	const identity = () => {
 		const plane = deps.getPlane();
@@ -158,7 +174,7 @@ export function registerExocomWorkTools(pi: ExtensionAPI, deps: ExocomWorkDeps):
 			if (pending) return pending;
 			return new Text(`${theme.fg("toolTitle", theme.bold("exocom ask "))}${theme.fg("accent", normalizeMetadataText(args.target, 80, "peer"))}`, 0, 0);
 		},
-		renderResult: renderLiteralToolResult,
+		renderResult: renderWorkMessage("question", "question recorded"),
 	});
 
 	pi.registerTool({
@@ -185,7 +201,7 @@ export function registerExocomWorkTools(pi: ExtensionAPI, deps: ExocomWorkDeps):
 			if (pending) return pending;
 			return new Text(`${theme.fg("toolTitle", theme.bold("exocom answer "))}${theme.fg("accent", normalizeMetadataText(args.ask_id, 80, "ask"))}`, 0, 0);
 		},
-		renderResult: renderLiteralToolResult,
+		renderResult: renderWorkMessage("evidence", "answer recorded"),
 	});
 
 	pi.registerTool({
@@ -212,7 +228,7 @@ export function registerExocomWorkTools(pi: ExtensionAPI, deps: ExocomWorkDeps):
 			if (pending) return pending;
 			return new Text(`${theme.fg("toolTitle", theme.bold("exocom decline "))}${theme.fg("accent", normalizeMetadataText(args.ask_id, 80, "ask"))}`, 0, 0);
 		},
-		renderResult: renderLiteralToolResult,
+		renderResult: renderWorkMessage("reason", "decline recorded"),
 	});
 
 	pi.registerTool({

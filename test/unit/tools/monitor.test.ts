@@ -173,6 +173,20 @@ test("monitor arm result card collapses to mode and a relative deadline — the 
 	const before = JSON.stringify(result);
 	const args = { action: "arm", command: "node", label: "build finished", mode: "output" };
 	assert.equal(stripVTControlCharacters(tool.renderCall(args, plainTheme).render(200).join("\n")).trimEnd(), "monitor arm build finished");
+	const request = { ...args, command: "node", args: ["check build.mjs", ""] };
+	const call = (expanded: boolean) => stripVTControlCharacters(tool.renderCall(request, plainTheme, { expanded, keyHint: () => "alt+e to expand" }).render(200).join("\n"));
+	assert.match(call(false), /alt\+e to expand/);
+	assert.doesNotMatch(call(false), /check build/);
+	assert.match(call(true), /node[\s\S]*"check build\.mjs" ""/);
+	const escapedArgs = { ...request, args: ["a\tb", "a\rb", "a\nb"] };
+	const expandedArgs = tool.renderCall(escapedArgs, plainTheme, { expanded: true }).render(200).join("\n");
+	assert.ok(expandedArgs.includes(escapedArgs.args.map((value) => JSON.stringify(value)).join(" ")));
+	for (const diagnostic of ["permission denied", "permission denied ".repeat(40)]) {
+		const context = { args: request, expanded: false, isError: true, keyHint: () => "alt+e to expand" };
+		const result = { content: [{ type: "text", text: diagnostic }], details: {} };
+		const card = [...tool.renderCall(request, plainTheme, context).render(80), ...tool.renderResult(result, context, plainTheme, context).render(80)].join("\n");
+		assert.equal(card.split("alt+e to expand").length - 1, 1, card);
+	}
 	const raw = tool.renderResult(result, { expanded: false }, plainTheme, { isError: false, args }).render(200).join("\n");
 	const collapsed = stripVTControlCharacters(raw);
 	assert.match(collapsed, /^armed · output · deadline in \d/, "only facts the call line does not carry");

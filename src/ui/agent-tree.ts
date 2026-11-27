@@ -4,6 +4,7 @@ import { isThinkingLevel, type ThinkingLevel } from "../core/types.ts";
 import type { WorkerChatSnapshot } from "../core/worker-chat.ts";
 import type { ChildUsage } from "../engine/stream.ts";
 import type { ThemeColor } from "@earendil-works/pi-coding-agent";
+import { summarizeFailure } from "./failure-summary.ts";
 import { effortText } from "./model-effort.ts";
 import { compactInlineText } from "./presentation.ts";
 import { type RowSpan, rowText, type StyledRow } from "./styled-row.ts";
@@ -268,6 +269,12 @@ function safeInline(value: string): string {
 	return compactInlineText(value, { maxChars: 96 });
 }
 
+export function compactNodeDetail(node: AgentNode, maxChars = 96): string {
+	if (!node.detail) return "";
+	const detail = node.status === "failed" && !isNonAgentNode(node) ? summarizeFailure(node.detail, node.agent) : node.detail;
+	return compactInlineText(detail, { maxChars });
+}
+
 /** Shorter bounded text for one-line digest representatives. */
 function safeDigestInline(value: string): string {
 	return compactInlineText(value, { maxChars: 48 });
@@ -310,7 +317,7 @@ export function renderAgentTreeRows(nodes: AgentNode[], opts: RenderOptions = {}
 			// The effort rides AFTER the label clamp — the existing per-part clipping is untouched;
 			// the appended field is at most ` · minimal→xhigh` wide.
 			const effort = effortTag(node.thinking, node.thinkingEffective);
-			const detailText = node.detail ? safeInline(node.detail) : "";
+			const detailText = compactNodeDetail(node);
 			const waiting = opts.waitingForSupervisor?.has(node.id) ?? false;
 			const clock = opts.now !== undefined ? runningAnnotation(node, opts.now, opts.stallMs ?? 0, waiting) : undefined;
 			const flagged = clock !== undefined && opts.now !== undefined && node.status === "running"
@@ -445,7 +452,7 @@ export function projectAgentTreeDigests(nodes: AgentNode[], hidden: readonly Age
 	if (failed.length > 0) {
 		const names = failed.slice(0, 2).map((node) => {
 			const label = safeInline(node.label) || "agent";
-			const detail = node.detail ? safeInline(node.detail) : "";
+			const detail = compactNodeDetail(node);
 			return detail ? `${label} (${detail})` : label;
 		});
 		const extra = failed.length - names.length;

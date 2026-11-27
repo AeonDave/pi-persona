@@ -978,7 +978,7 @@ test("a failed strategy leg replaces its last activity with the terminal cause w
 	const m = makeMockPi();
 	piPersona(m.pi, { engineFactories: { makeEngine: () => { throw new Error("unexpected child engine"); }, makeInProcessEngine: (deps) => ({ run: async (spec) => {
 		deps.onProgress?.({ output: "", turns: 0, tokens: 0, activity: "inspecting source" });
-		if (spec.agent === "fails") return { agent: spec.agent, output: "", usage: emptyUsage(), ok: false, error: "contract rejected", failureKind: "contract" };
+		if (spec.agent === "fails") return { agent: spec.agent, output: "", usage: emptyUsage(), ok: false, error: "[fails · stub/omega +dyn(skills)] contract rejected", failureKind: "contract" };
 		await held;
 		return { agent: spec.agent, output: "ok", usage: emptyUsage(), ok: true };
 	} }) } });
@@ -989,7 +989,7 @@ test("a failed strategy leg replaces its last activity with the terminal cause w
 		await waitUntil(() => (widgets["persona-agents"] ?? []).some((line) => /✗.*fails/.test(line)), "the failed member to settle");
 		const row = widgets["persona-agents"]!.find((line) => /✗.*fails/.test(line))!;
 		assert.match(row, /contract rejected/);
-		assert.doesNotMatch(row, /inspecting source/);
+		assert.doesNotMatch(row, /inspecting source|\[fails ·|\+dyn\(/);
 	} finally {
 		release();
 		await m.fire("session_shutdown", {}, ctx);

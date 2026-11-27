@@ -11,7 +11,7 @@ interface LiteralResult {
 
 export function renderLiteralToolResult(
 	result: LiteralResult,
-	{ expanded }: { expanded: boolean },
+	{ expanded, hasDetails }: { expanded: boolean; hasDetails?: boolean },
 	theme: Theme,
 	context?: { isError?: boolean; keyHint?: KeybindingHints["keyHint"] },
 ): Component {
@@ -19,14 +19,24 @@ export function renderLiteralToolResult(
 	const failed = context?.isError ?? result.isError ?? false;
 	const heading = failed ? theme.fg("error", theme.bold("failed")) : undefined;
 	if (expanded) return new Text(`${heading ? `${heading}\n` : ""}${theme.fg("toolOutput", full)}`, 0, 0);
+	return renderLiteralPreview(full, theme, context, { ...(heading ? { heading } : {}), hasDetails: !!hasDetails });
+}
+
+/** Keep the literal body within the viewport. An explicit detail outside the preview also warrants a hint. */
+export function renderLiteralPreview(
+	body: string,
+	theme: Theme,
+	context?: { keyHint?: KeybindingHints["keyHint"] },
+	options: { heading?: string; maxLines?: number; hasDetails?: boolean } = {},
+): Component {
 	return {
 		invalidate() { /* Preview layout follows the width supplied by the host. */ },
 		render(width) {
 			if (width <= 0) return [];
-			const preview = compactLiteralText(full, 4, Math.min(width, 100));
-			const hint = preview.truncated ? sanitizeTerminalText(context?.keyHint?.("app.tools.expand", "to expand") ?? "to expand") : undefined;
+			const preview = compactLiteralText(body, options.maxLines ?? 4, Math.min(width, 100));
+			const hint = options.hasDetails || preview.truncated ? sanitizeTerminalText(context?.keyHint?.("app.tools.expand", "to expand") ?? "to expand") : undefined;
 			return [
-				...(heading ? [heading] : []),
+				...(options.heading ? [options.heading] : []),
 				...preview.text.split("\n").map((line) => theme.fg("toolOutput", line)),
 				...(hint ? [theme.fg("dim", hint)] : []),
 			].map((line) => truncateToWidth(line, width, "…"));

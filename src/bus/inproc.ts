@@ -292,6 +292,11 @@ export class InProcessBus {
 		return ids;
 	}
 
+	/** Sender snapshot from the live ask even after its inbox copy leaves retention. */
+	pendingAskSender(id: string): Readonly<Pick<Envelope, "from" | "fromLabel">> | undefined {
+		return this.pendingAsks.get(id)?.envelope;
+	}
+
 	/** Whether `handle` currently has a live ask (`decision`/`interview`) awaiting a reply.
 	 *  The one question an idle/startup watchdog needs to tell real silence from a leg
 	 *  legitimately blocked on the supervisor: re-arm while this is true, kill once it goes

@@ -1007,7 +1007,7 @@ export class ExocomPlane {
 		return JSON.stringify(descriptor);
 	}
 
-	async send(target: string, text: string, inReplyTo?: string): Promise<{ msg_id: string }> {
+	async send(target: string, text: string, inReplyTo?: string): Promise<{ msg_id: string; displayName: string }> {
 		const { identity } = this.deps;
 		// Routing order: the authenticated inbound context (replies), then the session-qualified
 		// token, then the human display name. A routing token names ONE session, so it NEVER falls
@@ -1036,6 +1036,7 @@ export class ExocomPlane {
 			?? qualified[0]
 			?? this.listPeers().find((e) => e.displayName === target);
 		if (!entry) throw new Error(`exocom: unknown peer "${target}"`);
+		const displayName = "displayName" in entry && typeof entry.displayName === "string" ? entry.displayName : this.humanDisplayLabelFor(entry);
 
 		const msg_id = randomUUID();
 		const hops = inReplyTo !== undefined ? nextHops(this.inboundContext.get(inboundHopKey(entry.session_id, inReplyTo))?.hops ?? 0) : 0;
@@ -1052,7 +1053,7 @@ export class ExocomPlane {
 		// max-files sweep in `cleanupArtifacts` is what reclaims it.
 		this.artifacts.delete(msg_id);
 		this.countSent(entry.session_id);
-		return { msg_id };
+		return { msg_id, displayName };
 	}
 
 	/** One signed frame to one peer, retried once after RECONNECT_DELAY_MS when the endpoint looks

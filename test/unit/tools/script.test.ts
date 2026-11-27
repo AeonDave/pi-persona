@@ -51,6 +51,11 @@ test("script start cards show only the countdown under the labelled call line, w
 	const theme = { fg: (_name: string, text: string) => text, bold: (text: string) => text };
 	const render = (expanded: boolean) => h.tool.renderResult(result, { expanded }, theme).render(180).join("\n");
 	assert.equal(h.tool.renderCall({ action: "run", label: "build project" }, theme).render(180).join("\n").trimEnd(), "script run build project");
+	const code = "printf 'hello'\nprintf 'done'";
+	const call = (expanded: boolean) => h.tool.renderCall({ action: "run", label: "build project", code }, theme, { expanded, keyHint: () => "alt+e to expand" }).render(180).join("\n");
+	assert.match(call(false), /alt\+e to expand/);
+	assert.doesNotMatch(call(false), /printf/);
+	assert.match(call(true), /printf 'hello'\s+printf 'done'/);
 	assert.match(render(false), /^started · deadline in \d/);
 	assert.doesNotMatch(render(false), /build project/, "the call line already names the job");
 	assert.doesNotMatch(render(false), /Started script-1|wakes you|1970-/);

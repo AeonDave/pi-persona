@@ -54,6 +54,12 @@ test("briefs show report findings before a trailing archive hint, failures prefe
 	assert.match(groupLegBrief(node("a", { status: "failed", output, detail: "provider rejected request" })), /provider rejected request/);
 });
 
+test("failed worker briefs lead with the cause when the provider wraps it in JSON", () => {
+	const cause = "Connection reset by peer.";
+	const detail = `[operator · zai/glm-5.4 +dyn(skills)] Provider API error: ${JSON.stringify({ detail: cause })}`;
+	assert.equal(groupLegBrief(node("Oak", { kind: "subagent", agent: "operator", status: "failed", detail })), `result: ${cause}`);
+});
+
 test("cumulative usage does not appear again as activity or substitute for a missing report", () => {
 	const usage = { ...emptyUsage(), input: 123, output: 45 };
 	const detail = formatUsage(usage);

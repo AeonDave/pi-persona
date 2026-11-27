@@ -10,6 +10,7 @@ import { compactInlineText, compactVisibleText, sanitizeTerminalText } from "../
 import { toolUsageField } from "../ui/usage.ts";
 import { sumUsage } from "../orchestration/reducers.ts";
 import { Text } from "@earendil-works/pi-tui";
+import { compactDiagnosticPreview, projectFailureReport } from "../ui/failure-report.ts";
 import { renderPendingCall } from "../ui/pending-call.ts";
 import { createReportBody } from "../ui/report-body.ts";
 import { orchestrationLaunchLines, withOrchestrationRequest, type OrchestrationLaunchSnapshot } from "../ui/orchestration-launch.ts";
@@ -176,9 +177,10 @@ export function registerFlowTool(pi: ExtensionAPI, d: FlowToolDeps): void {
 			}
 			const disposition = flowDisposition({ ok: !hostError && details.ok !== false, stoppedAtGate: details.stoppedAtGate });
 			const failed = disposition === "failed";
+			const report = projectFailureReport(full, failed ? details.error : undefined, "flow");
 			const failureBits = failed
 				? compactInlineText(
-						[details.failedPhase ? `phase ${details.failedPhase}` : undefined, details.failureKind, details.error]
+						[details.failedPhase ? `phase ${details.failedPhase}` : undefined, details.failureKind, report.cause]
 							.filter((part): part is string => !!part)
 							.join(" · "),
 						{ maxChars: 160 },
@@ -193,12 +195,17 @@ export function registerFlowTool(pi: ExtensionAPI, d: FlowToolDeps): void {
 			const metadata = details.launch ? `\n\nLaunch request (Pi may clamp effort):\n${orchestrationLaunchLines(details.launch, expanded, context).join("\n")}` : "";
 			if (expanded) {
 				// Real flow outcomes are fenced even after a phase fails; host/preflight errors are not.
-				if (failed && !full.startsWith("Sub-agent output (untrusted data):\n")) return new Text(`${title()}\n${theme.fg("toolOutput", full)}${metadata}`, 0, 0);
-				return createReportBody(full, theme, { header: title, footer: metadata }, context?.lastComponent);
+				if (failed && !full.startsWith("Sub-agent output (untrusted data):\n")) return new Text(`${title()}\n${theme.fg("toolOutput", report.fullBody)}${metadata}`, 0, 0);
+				return createReportBody(report.fullBody, theme, { header: title, footer: metadata }, context?.lastComponent);
 			}
-			const preview = compactVisibleText(full, { maxLines: 3, maxLineChars: 100 });
-			const hint = preview.truncated ? `\n${theme.fg("dim", expandDetailHint(context))}` : "";
-			return new Text(`${title()}\n${theme.fg("toolOutput", preview.text)}${hint}${theme.fg("dim", metadata)}`, 0, 0);
+			// The trusted failure heading already carries the diagnostic repeated outside the quoted flow output.
+			const compactBody = failed && full.startsWith("Sub-agent output (untrusted data):\n")
+				? report.compactBody.replace(/^Flow failed(?: at phase | \()[^\n]*$/gm, "")
+				: report.compactBody;
+			const renderPreview = failed && !details.error ? compactDiagnosticPreview : compactVisibleText;
+			const preview = renderPreview(compactBody, { maxLines: 3, maxLineChars: 100 });
+			const hint = preview.truncated || report.hiddenDiagnostic || compactBody !== report.compactBody ? `\n${theme.fg("dim", expandDetailHint(context))}` : "";
+			return new Text(`${title()}${compactBody ? `\n${theme.fg("toolOutput", preview.text)}` : ""}${hint}${theme.fg("dim", metadata)}`, 0, 0);
 		},
 	});
 }

@@ -104,6 +104,24 @@ test("intercom reply answers a child's blocking ask by id", async () => {
 	assert.equal(await waiting, "OFF", "the child's ask resolves with the reply");
 });
 
+test("intercom reply snapshots the original sender even after the inbox and retention window move on", async () => {
+	const bus = new InProcessBus();
+	bus.register("supervisor");
+	bus.register("scout#1", "Larch-parser");
+	const waiting = bus.ask("scout#1", "supervisor", "Choose the parsing mode", { kind: "decision" });
+	const [ask] = bus.take("supervisor");
+	assert.ok(ask);
+	for (let i = 0; i < 40; i++) bus.send("scout#1", "supervisor", "z".repeat(8_000));
+	bus.take("supervisor");
+	assert.equal(bus.retrieve(ask.id, "supervisor"), undefined);
+	const message = "Keep the current parser.\nRecord the decision.";
+	const result = runIntercom({ action: "reply", askId: ask.id, message }, bus, "supervisor");
+	assert.equal(await waiting, message);
+	assert.equal(result.text, `Replied to ${ask.id}.`);
+	assert.equal(result.details.target, "Larch-parser");
+	assert.equal(result.details.sentMessage, undefined, "Pi stores the reply body with the call");
+});
+
 test("intercom reply to an unknown/expired ask id reports failure (not a false 'Replied')", () => {
 	const bus = new InProcessBus();
 	bus.register("supervisor");

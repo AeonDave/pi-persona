@@ -30,6 +30,8 @@ export type ReadReply = {
 	status: TerminalStatus; provenance: ResultProvenance;
 } | { ok: false; code: ReadErrorCode; message: string };
 
+export type ReadPageDetails = Omit<Extract<ReadReply, { ok: true }>, "body">;
+
 export interface ScopedReader {
 	read(request: ResultReadRequest, signal?: AbortSignal): Promise<ReadReply>;
 	revoke(): void;
@@ -64,21 +66,32 @@ export function isReadRequest(value: unknown): value is ResultReadRequest {
 		&& (!("limit" in value) || (counter(value.limit) && value.limit >= 2 && value.limit <= RESULT_READ_MAX));
 }
 
+const PAGE_FIELDS = ["ok", "ref", "offset", "nextOffset", "storedChars", "originalChars", "truncated", "endOfStoredBody", "status", "provenance"];
+const REPLY_FIELDS = [...PAGE_FIELDS, "body", "code", "message"];
+
+/** Validate the stored page span independently of the raw body. Presentation may have stripped
+ * terminal controls or added quotation markers and cannot recover the original UTF-16 length. */
+export function isReadPageDetails(value: unknown): value is ReadPageDetails {
+	if (!closedRecord(value, PAGE_FIELDS) || value.ok !== true || !isResultRef(value.ref)
+		|| !counter(value.offset) || !counter(value.storedChars) || !counter(value.originalChars)
+		|| value.originalChars < value.storedChars || value.truncated !== (value.originalChars > value.storedChars)
+		|| (value.status !== "done" && value.status !== "failed" && value.status !== "stopped")
+		|| (value.provenance !== "result-output" && value.provenance !== "partial-output" && value.provenance !== "error")) return false;
+	const end = "nextOffset" in value ? value.nextOffset : value.storedChars;
+	if (!counter(end) || end < value.offset || end > value.storedChars || end - value.offset > RESULT_READ_MAX) return false;
+	return "nextOffset" in value
+		? value.endOfStoredBody === false && end > value.offset && end < value.storedChars
+		: value.endOfStoredBody === true;
+}
+
 export function isReadReply(value: unknown): value is ReadReply {
-	if (!closedRecord(value, ["ok", "ref", "body", "offset", "nextOffset", "storedChars", "originalChars",
-		"truncated", "endOfStoredBody", "status", "provenance", "code", "message"])) return false;
+	if (!closedRecord(value, REPLY_FIELDS)) return false;
 	if (value.ok === false) return closedRecord(value, ["ok", "code", "message"])
 		&& typeof value.code === "string" && Object.hasOwn(ERROR_MESSAGES, value.code)
 		&& value.message === ERROR_MESSAGES[value.code as ReadErrorCode];
-	if (value.ok !== true || "code" in value || "message" in value || !isResultRef(value.ref)
-		|| typeof value.body !== "string" || value.body.length > RESULT_READ_MAX || !counter(value.offset)
-		|| !counter(value.storedChars) || !counter(value.originalChars) || value.originalChars < value.storedChars
-		|| value.truncated !== (value.originalChars > value.storedChars)
-		|| (value.status !== "done" && value.status !== "failed" && value.status !== "stopped")
-		|| (value.provenance !== "result-output" && value.provenance !== "partial-output" && value.provenance !== "error")) return false;
-	const end = value.offset + value.body.length;
-	if (!Number.isSafeInteger(end) || end > value.storedChars || value.endOfStoredBody !== (end === value.storedChars)) return false;
-	return value.endOfStoredBody ? !("nextOffset" in value) : value.body.length > 0 && value.nextOffset === end;
+	const { body, ...page } = value;
+	return typeof body === "string" && isReadPageDetails(page)
+		&& body.length === (page.nextOffset ?? page.storedChars) - page.offset;
 }
 
 /** Page offsets are UTF-16; the archive, not transport, owns surrogate-boundary slicing. */

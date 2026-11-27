@@ -46,7 +46,7 @@ function catalogResult(tool: any, query?: string) {
 }
 
 function renderCard(tool: any, result: unknown, expanded: boolean, isError = false): string {
-	return stripVTControlCharacters(tool.renderResult(result, { expanded }, plainTheme, { isError }).render(400).join("\n"));
+	return stripVTControlCharacters(tool.renderResult(result, { expanded }, plainTheme, { isError, keyHint: () => "alt+e to expand" }).render(400).join("\n"));
 }
 
 test("models result card collapses to a counts line instead of echoing the catalog", async () => {
@@ -58,6 +58,7 @@ test("models result card collapses to a counts line instead of echoing the catal
 	const collapsed = renderCard(tool, result, false);
 	assert.match(collapsed, /40 catalog models/);
 	assert.match(collapsed, /showing 40/);
+	assert.match(collapsed, /to expand/);
 	assert.doesNotMatch(collapsed, /model-1\b|2026-\d{2}-\d{2}T|\u001b/, "no catalog rows, ISO stamps or escapes in the collapsed card");
 	assert.ok(collapsed.split("\n").length <= 2, `collapsed card stays compact, got ${collapsed.split("\n").length} lines`);
 	assert.equal(JSON.stringify(result), before, "rendering never mutates the tool result");
@@ -78,4 +79,12 @@ test("models shortlist and empty results carry a purpose-bearing collapsed line"
 	const empty = await modelsHarness(() => ({ lines: [], total: 0, capped: false, shortlist: false })).execute("call", { query: "sonnet" }, undefined, undefined, { cwd: "D:/project" });
 	assert.match(renderCard(tool, empty, false), /no catalog matches/);
 	assert.doesNotMatch(renderCard(tool, empty, false), /sonnet/, "the query is the call card's job, not the result card's");
+	assert.doesNotMatch(renderCard(tool, empty, false), /to expand/);
+});
+
+test("a saved catalog result without counts displays its actual contents", () => {
+	const tool = modelsHarness(() => ({ lines: [], total: 0, capped: false, shortlist: false }));
+	const card = renderCard(tool, { content: [{ type: "text", text: "provider/available" }] }, false);
+	assert.match(card, /provider\/available/);
+	assert.doesNotMatch(card, /no catalog matches/);
 });

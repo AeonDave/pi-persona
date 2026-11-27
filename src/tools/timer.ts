@@ -1,7 +1,7 @@
 /** Session timer tool — arm a wall-clock wake. */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
-import { renderPendingCall } from "../ui/pending-call.ts";
+import { renderWakeToolCall, wakeCallBody } from "../ui/wake-tool-call.ts";
 import { Type } from "typebox";
 import { armWakeAdvice, failureDetails } from "../extension/shared.ts";
 import { formatRemaining, type TimerScheduler } from "../core/timer.ts";
@@ -104,11 +104,7 @@ export function registerTimerTool(pi: ExtensionAPI, d: TimerToolDeps): void {
 			return { content: [{ type: "text", text }], details: { action: "arm", id: e.id, fireAtEpochMs: e.fireAtEpochMs, label: compactInlineText(e.label, { maxChars: 120 }), ok: true }, isError: false };
 		},
 		renderCall(args, theme, context) {
-			const pending = renderPendingCall("timer", theme, context);
-			if (pending) return pending;
-			const action = compactInlineText(args.action ?? "", { maxChars: 12 });
-			const label = compactInlineText(args.label ?? args.id ?? "", { maxChars: 96 });
-			return new Text(`${theme.fg("toolTitle", theme.bold(`timer ${action}`))}${label ? ` ${theme.fg("dim", label)}` : ""}`, 0, 0);
+			return renderWakeToolCall("timer", args, theme, context);
 		},
 		renderResult(result, { expanded }, theme, context) {
 			const details = (result.details ?? {}) as { action?: string; ok?: boolean; id?: string; label?: string; fireAtEpochMs?: number };
@@ -117,7 +113,7 @@ export function registerTimerTool(pi: ExtensionAPI, d: TimerToolDeps): void {
 			const isArm = !failed && details.action === "arm" && details.ok === true && fireAt !== undefined;
 			// Failures and every now/list/cancel receipt share the one literal renderer:
 			// error heading, bounded sanitized preview, expansion hint.
-			if (!isArm || expanded) return renderLiteralToolResult(result, { expanded }, theme, context);
+			if (!isArm || expanded) return renderLiteralToolResult(result, { expanded, hasDetails: failed && !!wakeCallBody("timer", context?.args) }, theme, context);
 			const left = fireAt - Date.now();
 			const due = left > 0 ? `fires in ${formatDuration(left)}` : "due now";
 			// The label is optional (it defaults to the id): repeat it only when the call line did not show it.

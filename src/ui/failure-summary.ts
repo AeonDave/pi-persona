@@ -2,14 +2,24 @@ import { compactInlineText, sanitizeTerminalText } from "./presentation.ts";
 
 const MAX_INSPECTED_CHARS = 16_384;
 const MAX_SUMMARY_COLUMNS = 140;
+const MAX_RUNTIME_TAG_CHARS = 513;
+const RUNTIME_FAILURE_TAG = /^\[([^\s[\]]+) · (\(no model\)|[^\s[\]]+)( \+dyn\((?:model|skills|tools)(?:,(?:model|skills|tools))*\))?\]\s/;
 
 /** Display-only cause preview. The caller retains the original error for diagnostics. */
-export function summarizeFailure(error: string): string {
+export function summarizeFailure(error: string, agent?: string): string {
 	let source = sanitizeTerminalText(error.slice(0, MAX_INSPECTED_CHARS)).trim();
-	// Omit only the runtime's identity/model wrapper, not meaningful tags such as [BLOCKED].
-	const wrapperEnd = source.startsWith("[") ? source.indexOf("]") : -1;
-	if (wrapperEnd > 0 && wrapperEnd <= 512 && source.slice(1, wrapperEnd).includes(" · ")) source = source.slice(wrapperEnd + 1).trim();
-	const reason = sanitizeTerminalText(jsonCause(source) ?? source).replace(/\s+/g, " ").trim();
+	const tag = RUNTIME_FAILURE_TAG.exec(source.slice(0, MAX_RUNTIME_TAG_CHARS + 1));
+	if (tag) {
+		const [, taggedAgent, model, overrides] = tag;
+		// A bare model id can look like a provider's bracketed status. Use the worker identity when available.
+		const workerTag = agent === undefined ? model === "(no model)" || model?.includes("/") || !!overrides : taggedAgent === agent;
+		if (workerTag) source = source.slice(tag[0].length).trim();
+	}
+	// Engines append the last provider error as context after reporting the actual cause of death.
+	const secondary = source.startsWith("agent ") ? source.indexOf(" (last error: ") : -1;
+	const jsonStart = secondary > 0 ? source.indexOf("{") : -1;
+	const primary = secondary > 0 && (jsonStart < 0 || secondary < jsonStart) ? source.slice(0, secondary) : source;
+	const reason = sanitizeTerminalText(jsonCause(primary) ?? primary).replace(/\s+/g, " ").trim();
 	if (/^(?:(?:the|this)\s+)?(?:['"`][^'"`]{1,200}['"`]\s+)?model\s+is\s+not\s+supported\s+when\s+using\s+Codex\s+with\s+a\s+ChatGPT\s+account[.!]?$/i.test(reason)) {
 		return "Model not supported by this ChatGPT account.";
 	}

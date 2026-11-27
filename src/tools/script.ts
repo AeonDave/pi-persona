@@ -2,8 +2,7 @@
  * while keeping separate capabilities, identities, history and operator rows. */
 import { getShellConfig, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { Text } from "@earendil-works/pi-tui";
-import { renderPendingCall } from "../ui/pending-call.ts";
+import { renderWakeToolCall, wakeCallBody } from "../ui/wake-tool-call.ts";
 import type { MonitorArchive } from "../monitor/archive.ts";
 import type { ScriptSession } from "../script/session.ts";
 import { armWakeAdvice, failureDetails } from "../extension/shared.ts";
@@ -83,14 +82,12 @@ export function registerScriptTool(pi: ExtensionAPI, d: ScriptToolDeps): void {
 			return { content: [{ type: "text" as const, text: `Started ${result.entry.id} (${compactInlineText(result.entry.label)}); ${completion}. Deadline ${new Date(result.entry.expiresAtEpochMs).toISOString()}. ${armWakeAdvice(ctx, "script", "completion", "Keep this session open. Continue independent work, or end your turn; it wakes you by itself. Never sleep or poll to wait for it.")}` }], details: { ok: true, id: result.entry.id, label: compactInlineText(result.entry.label), expiresAtEpochMs: result.entry.expiresAtEpochMs } };
 		},
 		renderCall(args, theme, context) {
-			const pending = renderPendingCall("script", theme, context);
-			if (pending) return pending;
-			return new Text(`${theme.fg("toolTitle", theme.bold(`script ${compactInlineText(args.action ?? "", { maxChars: 12 })}`))} ${theme.fg("dim", compactInlineText(args.label ?? args.id ?? "", { maxChars: 96 }))}`, 0, 0);
+			return renderWakeToolCall("script", args, theme, context);
 		},
 		renderResult(result, options, theme, context) {
 			const details = (result.details ?? {}) as { ok?: boolean; label?: string; expiresAtEpochMs?: number };
 			// A successful run always had a label, and the call line above already shows it.
-			return renderProcessStartResult(result, options, theme, context,
+			return renderProcessStartResult(result, { expanded: options.expanded, hasDetails: !!context?.isError && !!wakeCallBody("script", context.args) }, theme, context,
 				details.ok === true && typeof details.label === "string"
 					? { verb: "started", ...(details.expiresAtEpochMs === undefined ? {} : { expiresAtEpochMs: details.expiresAtEpochMs }) }
 					: undefined);

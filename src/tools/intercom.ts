@@ -31,6 +31,7 @@ export interface IntercomDetails {
 	action: string;
 	/** Exact bus route plus display identity frozen when this control operation ran. */
 	busId?: string;
+	askId?: string;
 	target?: string;
 	/** Exact accepted outgoing message, retained for literal history expansion. */
 	sentMessage?: string;
@@ -170,10 +171,17 @@ export function runIntercom(params: IntercomParams, bus: InProcessBus, self: str
 			if (params.message.length > MAX_INTERCOM_MESSAGE_CHARS) {
 				return { text: `intercom reply message exceeds the ${MAX_INTERCOM_MESSAGE_CHARS}-character limit.`, details: { action: "reply", ok: false } };
 			}
+			const asker = bus.pendingAskSender(params.askId);
 			const replied = bus.reply(params.askId, params.message);
 			const displayAskId = sanitizeDisplayLabel(params.askId, "ask");
 			return replied
-				? { text: `Replied to ${displayAskId}.`, details: { action: "reply", ok: true } }
+				? {
+					text: `Replied to ${displayAskId}.`,
+					details: {
+						action: "reply", ok: true, askId: params.askId,
+						...(asker ? { busId: asker.from, target: sanitizeDisplayLabel(asker.fromLabel ?? asker.from, "peer", 120) } : {}),
+					},
+				}
 				: {
 						text: `No pending ask with id "${displayAskId}". Only pending asks can receive a reply; progress messages cannot. Check "inbox" for a current reply id; the ask may have settled or the id may be incorrect.`,
 						details: { action: "reply", ok: false },
