@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 
+import { MAX_TIMER_DELAY_MS } from "../../src/core/config.ts";
 import { runChildAgent } from "../../src/engine/child.ts";
 
 const FAKE = fileURLToPath(new URL("../fixtures/fake-pi.mjs", import.meta.url));
@@ -128,7 +129,44 @@ test("runChildAgent kills a hung child after timeoutMs and reports the timeout (
 	assert.equal(r.ok, false);
 	assert.match(r.errorMessage ?? "", /timed out/);
 	assert.match(r.errorMessage ?? "", /raise this leg's timeoutMs if its tool is legitimately silent/, "the idle-timeout text names the remedy");
+	assert.doesNotMatch(r.errorMessage ?? "", /open tool/, "a silent child has no observed tool to attribute");
 });
+
+for (const deadline of ["timeoutMs", "hardTimeoutMs", "startupTimeoutMs"] as const) {
+	test(`runChildAgent preserves the stream error known at ${deadline} before final drain`, async (t) => {
+		t.mock.timers.enable({ apis: ["setTimeout"] });
+		const report = (errorMessage: string) => JSON.stringify({ type: "message_end", message: { role: "assistant", content: [], errorMessage } });
+		// Complete lines are delivered immediately. The final record has no newline and first
+		// becomes an event in finish(), after the watchdog has initiated termination.
+		const prior = deadline === "startupTimeoutMs" ? "" : report("preexisting failure") + "\n";
+		const payload = prior + report("This operation was aborted");
+		const script = `process.stdout.write(${JSON.stringify(payload)});setInterval(() => {}, 1000)`;
+		let observed!: () => void;
+		const firstChunk = new Promise<void>((resolve) => { observed = resolve; });
+		const run = runChildAgent({ task: "deadline evidence" }, undefined, {
+			resolveInvocation: () => ({ command: process.execPath, args: ["-e", script] }),
+			[deadline]: 1000, killGraceMs: 150, onProgress: observed,
+		});
+		await firstChunk;
+		t.mock.timers.tick(1000);
+		const result = await run;
+		assert.equal(result.timedOut, true);
+		assert.equal(result.usage.turns, prior ? 2 : 1, "the final message was actually drained");
+		if (prior) assert.match(result.errorMessage ?? "", /last error: preexisting failure/);
+		else assert.doesNotMatch(result.errorMessage ?? "", /last error/);
+		assert.doesNotMatch(result.errorMessage ?? "", /This operation was aborted/);
+	});
+
+	test(`runChildAgent honors ${deadline} beyond the native timer limit`, async () => {
+		const result = await runChildAgent({ task: "finish normally" }, undefined, {
+			resolveInvocation: resolveFake,
+			[deadline]: MAX_TIMER_DELAY_MS + 1,
+		});
+		assert.equal(result.timedOut, false, result.errorMessage);
+		assert.equal(result.ok, true, result.stderr);
+		assert.match(result.output, /finish normally/);
+	});
+}
 
 test(
 	"runChildAgent escalates to a force tree-kill when the child ignores SIGTERM",
@@ -355,6 +393,8 @@ test("runChildAgent closes every still-running tool when the child is killed mid
 	});
 
 	assert.equal(r.timedOut, true);
+	assert.match(r.errorMessage ?? "", /no output for 250ms \(open tool at timeout: bash\)/);
+	assert.doesNotMatch(r.errorMessage ?? "", /read|secret|build/, "closed calls and arguments stay out of the diagnosis");
 	assert.deepEqual(snaps.flatMap((snap) => snap.toolEvent ? [snap.toolEvent] : []), [
 		{ phase: "start", callId: "call-1", name: "read" },
 		{ phase: "start", callId: "call-2", name: "bash" },

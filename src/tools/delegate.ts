@@ -9,7 +9,8 @@ import { cappedList } from "../core/format.ts";
 import { isThinkingLevel, THINKING_LEVELS, type ThinkingLevel } from "../core/types.ts";
 import { sanitizeDisplayLabel } from "../core/display-label.ts";
 import { parseVerification, type WorktreeVerificationSpec } from "../core/worktree-verification.ts";
-import { type AgentRunSpec, type InfrastructureFailure, isInfrastructureFailure, isPositiveFiniteMs } from "../orchestration/sdk.ts";
+import { isPositiveFiniteMs } from "../core/config.ts";
+import { type AgentRunSpec, type InfrastructureFailure, isInfrastructureFailure } from "../orchestration/sdk.ts";
 
 export interface DelegateTask {
 	agent: string;
@@ -338,6 +339,9 @@ export function coerceDelegateParams(raw: unknown): { ok: true; params: Delegate
 	}
 	const tasks = coerceTaskList(bag.tasks);
 	if (!tasks.ok) return tasks;
+	if (tasks.value?.length && isPositiveFiniteMs(bag.timeoutMs)) {
+		return { ok: false, error: "delegate: for a batch, put the idle window in tasks[].timeoutMs on each worker that needs it. Top-level timeoutMs applies to a single worker." };
+	}
 	if (tasks.value !== undefined) bag.tasks = tasks.value;
 	const brief = coerceBriefField(bag.brief, "brief");
 	if (!brief.ok) return brief;

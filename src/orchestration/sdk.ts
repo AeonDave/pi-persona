@@ -81,14 +81,6 @@ export function withResultRefs(engine: StrategyEngine, resultRefs: readonly stri
 	};
 }
 
-/** Is `x` a genuine positive, finite `timeoutMs` override — vs. absent/junk (undefined, NaN,
- *  Infinity, ≤0), which means "no override, fall back to the run's existing default"? The
- *  ONE predicate every `timeoutMs` site gates on (`specOf`, the single-leg delegate path,
- *  and both engine adapters), so they can't drift into checking it differently. */
-export function isPositiveFiniteMs(x: number | undefined): x is number {
-	return x !== undefined && Number.isFinite(x) && x > 0;
-}
-
 /** A live snapshot of an agent's progress (for streaming UI). */
 export interface AgentProgress {
 	/** Bounded operator-only conversation, distinct from model-visible output and lifecycle events. */

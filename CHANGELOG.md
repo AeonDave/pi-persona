@@ -6,6 +6,11 @@ used in its [GitHub releases](https://github.com/AeonDave/pi-persona/releases).
 
 ## [Unreleased]
 
+- A worker can request an idle window longer than Node's maximum single timer delay. A slow session
+  shutdown can no longer turn a completed in-process run into a timeout.
+- Timeout diagnostics preserve the error observed before cancellation. Idle failures also identify
+  open tools. `delegate` shows the default idle window and catches a batch
+  timeout placed at the top level before any workers start.
 - Failed worker rows and F9 show the cause beside the worker's name. Expand a failure card for the
   original engine diagnostic. Failed councils, flows and delegate batches keep partial results
   available, and operator-stopped batches are labelled `stopped`.

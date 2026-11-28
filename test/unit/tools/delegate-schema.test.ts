@@ -13,7 +13,7 @@ import { tempDir } from "../../setup/temp-dir.ts";
 function registeredDelegate(): ToolDefinition {
 	let captured: ToolDefinition | undefined;
 	registerDelegateTool({ registerTool: (tool: ToolDefinition) => { captured = tool; } } as ExtensionAPI, {
-		RUN_LIMITS: { maxChildren: 64, maxConcurrency: 4 },
+		RUN_LIMITS: { maxChildren: 64, maxConcurrency: 4, timeoutMs: 180_000 },
 		config: { ledgerV2: false }, tracker: { onComplete: () => {} },
 	} as unknown as DelegateToolDeps);
 	assert.ok(captured);
@@ -42,6 +42,28 @@ test("delegate publishes canonical nested objects and lists instead of JSON-stri
 		assert.equal(schema.properties[field]?.type, "array");
 		assert.equal(schema.properties.tasks?.items?.properties?.[field]?.type, "array");
 	}
+});
+
+test("single and batch workers advertise the effective idle window and how to size a quiet tool call", () => {
+	const { properties } = registeredDelegate().parameters as unknown as {
+		properties: { timeoutMs: { description: string }; tasks: { items: { properties: { timeoutMs: { description: string } } } } };
+	};
+	for (const field of [properties.timeoutMs, properties.tasks.items.properties.timeoutMs]) {
+		assert.match(field.description, /180000 ms/);
+		assert.match(field.description, /silence|silent/i);
+	}
+});
+
+test("a batch reports a misplaced positive idle override before launching with the default", () => {
+	const worker = { agent: "operator", task: "Wait for completion" };
+	for (const tasks of [[worker], JSON.stringify([worker])]) {
+		const result = coerceDelegateParams({ tasks, timeoutMs: 400_000 });
+		assert.equal(result.ok, false);
+		if (!result.ok) assert.match(result.error, /tasks\[\]\.timeoutMs/);
+	}
+	const { tasks } = validated(registeredDelegate(), { tasks: [{ ...worker, timeoutMs: 400_000 }, worker] });
+	assert.equal(specOf(tasks![0]!).timeoutMs, 400_000);
+	assert.equal(specOf(tasks![1]!).timeoutMs, undefined);
 });
 
 test("verification survives native and encoded single/batch calls and is copied into the run spec", () => {

@@ -35,7 +35,8 @@ import { installFrozenMemoryOwner } from "../extension/memory-owner.ts";
 import { attributeInbound } from "../core/fence.ts";
 import { isThinkingLevel, type ThinkingLevel } from "../core/types.ts";
 import { roleHint } from "../orchestration/roster.ts";
-import { type AgentRunSpec, type InfrastructureFailure, isPositiveFiniteMs, type SteerFn, type StrategyEngine } from "../orchestration/sdk.ts";
+import { isPositiveFiniteMs } from "../core/config.ts";
+import type { AgentRunSpec, InfrastructureFailure, SteerFn, StrategyEngine } from "../orchestration/sdk.ts";
 import type { AgentResult } from "../orchestration/types.ts";
 import { makeReadResultTool } from "../tools/read-result.ts";
 import { makeCodeOutlineTool } from "../tools/code-outline.ts";
@@ -49,6 +50,8 @@ import { combineSignals } from "./signals.ts";
 import { toolModifierFailure, unknownAgentFailure, unknownContractFailure } from "./spec-preflight.ts";
 import { mergeSessionToolAllowlist } from "./session-tools.ts";
 import { applyEvent, createStreamState, emptyUsage, type ProgressSnapshot, snapshot } from "./stream.ts";
+import { armWatchdogTimeout } from "./watchdog-timeout.ts";
+import { deadlineDiagnostic, type WatchdogDeadline } from "./deadline-diagnostic.ts";
 import { validateWorkerSession, type WorkerSession } from "./worker-session.ts";
 import { installSessionContract } from "./session-contract.ts";
 
@@ -660,9 +663,9 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			let session!: InProcSession;
 			let initializedSession: InProcSession | undefined;
 			let aborted = false;
-			let timedOut = false;
-			let hardTimedOut = false;
-			let startupTimedOut = false;
+			let timeoutError: string | undefined;
+			// Names are needed both for the idle snapshot and for synthetic closes at settlement.
+			const openToolCalls = new Map<string, string>();
 			let cancellationRequested = false;
 			const initController = new AbortController();
 			const abortSession = (): void => {
@@ -675,15 +678,16 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 					releaseAbortGate();
 				}
 			};
-			const requestCancellation = (kind: "abort" | "idle" | "startup" | "hard"): void => {
+			const requestCancellation = (kind: "abort" | WatchdogDeadline): void => {
 				// Host abort hooks can synchronously emit more events or cancellation signals.
 				// Preserve the first cause and invoke the host abort hook only once.
 				if (cancellationRequested) return;
 				cancellationRequested = true;
 				if (kind === "abort") aborted = true;
-				else if (kind === "idle") timedOut = true;
-				else if (kind === "hard") hardTimedOut = true;
-				else startupTimedOut = true;
+				else {
+					const ms = kind === "idle" ? watchdogMs : kind === "hard" ? hardMs : startupMs;
+					timeoutError = deadlineDiagnostic(kind, ms, initializedSession ? "inproc" : "initialization", openToolCalls, state.errorMessage);
+				}
 				if (!initController.signal.aborted) initController.abort();
 				abortSession();
 			};
@@ -696,24 +700,21 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			// a live pending ask from THIS child re-arms the window instead of killing.
 			const specTimeoutMs = isPositiveFiniteMs(spec.timeoutMs) ? spec.timeoutMs : undefined;
 			const watchdogMs = specTimeoutMs ?? (isPositiveFiniteMs(deps.timeoutMs) ? deps.timeoutMs : 0);
-			let idleTimer: ReturnType<typeof setTimeout> | undefined;
+			let cancelIdleTimer: (() => void) | undefined;
 			const disarmIdle = (): void => {
-				if (idleTimer) {
-					clearTimeout(idleTimer);
-					idleTimer = undefined;
-				}
+				cancelIdleTimer?.();
+				cancelIdleTimer = undefined;
 			};
 			const armIdle = (): void => {
 				disarmIdle();
 				if (watchdogMs <= 0 || cancellationRequested) return;
-				idleTimer = setTimeout(() => {
+				cancelIdleTimer = armWatchdogTimeout(() => {
 					if (childHandle && deps.bus?.hasPendingAskFrom(childHandle)) {
 						armIdle();
 						return;
 					}
 					requestCancellation("idle");
 				}, watchdogMs);
-				idleTimer.unref?.();
 			};
 
 			// Hard wall-clock cap: armed ONCE, never reset by events — a definite lifetime ceiling
@@ -721,17 +722,14 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			// It starts before session construction, matching the child engine's process lifetime cap.
 			// Applies unconditionally — including to a coaching child legitimately blocked on a reply.
 			const hardMs = isPositiveFiniteMs(deps.hardTimeoutMs) ? deps.hardTimeoutMs : 0;
-			let hardTimer: ReturnType<typeof setTimeout> | undefined;
+			let cancelHardTimer: (() => void) | undefined;
 			const armHard = (): void => {
-				if (hardMs <= 0 || hardTimer) return;
-				hardTimer = setTimeout(() => requestCancellation("hard"), hardMs);
-				hardTimer.unref?.();
+				if (hardMs <= 0 || cancelHardTimer) return;
+				cancelHardTimer = armWatchdogTimeout(() => requestCancellation("hard"), hardMs);
 			};
 			const disarmHard = (): void => {
-				if (hardTimer) {
-					clearTimeout(hardTimer);
-					hardTimer = undefined;
-				}
+				cancelHardTimer?.();
+				cancelHardTimer = undefined;
 			};
 
 			// Startup deadline (mirrors the child engine): one window from construction to the first
@@ -742,17 +740,15 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			// behaves exactly as it always has while initializing.
 			const startupMs = isPositiveFiniteMs(deps.startupTimeoutMs) ? deps.startupTimeoutMs : 0;
 			let startupProgressed = false;
-			let startupTimer: ReturnType<typeof setTimeout> | undefined;
+			let cancelStartupTimer: (() => void) | undefined;
 			const disarmStartup = (): void => {
-				if (startupTimer) {
-					clearTimeout(startupTimer);
-					startupTimer = undefined;
-				}
+				cancelStartupTimer?.();
+				cancelStartupTimer = undefined;
 			};
 			const armStartup = (): void => {
 				disarmStartup();
 				if (startupMs <= 0) return;
-				startupTimer = setTimeout(() => {
+				cancelStartupTimer = armWatchdogTimeout(() => {
 					if (startupProgressed) return;
 					if (childHandle && deps.bus?.hasPendingAskFrom(childHandle)) {
 						armStartup();
@@ -760,7 +756,6 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 					}
 					requestCancellation("startup");
 				}, startupMs);
-				startupTimer.unref?.();
 			};
 			const noteStartupProgress = (): void => {
 				if (startupProgressed) return;
@@ -845,22 +840,15 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 					const settled = initializationOutcome ?? await settledWithinProof(initialization);
 					sessionQuiescent = settled !== undefined && (retired ?? settled.retired ?? true);
 				}
-				const initError = hardTimedOut
-					? `${tag} agent exceeded the ${hardMs}ms hard cap during session initialization`
-					: timedOut
-						? `${tag} agent timed out during session initialization — no events for ${watchdogMs}ms`
-					: startupTimedOut
-						? `${tag} agent produced no output within the ${startupMs}ms startup window while initializing the session`
-						: `${tag} agent aborted`;
 				const cleanupHint = initializationSettled ? "" : "; initialization cancellation requested, but the host loader may still be unwinding. If initialization keeps hanging, restart Pi and use PI_PERSONA_ENGINE=child";
 				return {
 					agent: spec.agent,
 					output: "",
 					usage: emptyUsage(),
 					ok: false,
-					error: `${initError}${cleanupHint}`,
+					error: `${tag} ${timeoutError ?? "agent aborted"}${cleanupHint}`,
 					...(resolvedRef ? { modelUsed: resolvedRef } : {}),
-					failureKind: hardTimedOut || timedOut || startupTimedOut ? "timeout" : "abort",
+					failureKind: timeoutError !== undefined ? "timeout" : "abort",
 					...thinkingMetadata,
 					...(spec.session ? { sessionSaved: false, sessionQuiescent } : {}),
 				};
@@ -874,10 +862,6 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			let unsub: (() => void) | undefined;
 			let unsubBridge: (() => void) | undefined;
 			let steerable = true;
-			// Calls whose start crossed the progress seam but whose end has not. The tool NAME rides
-			// beside the id because the synthetic close below has to carry it, and stream.ts tracks
-			// only the ids. Mirrors the child engine's `openToolCalls`.
-			const openToolCalls = new Map<string, string>();
 			// One progress tick, routed exactly as the subscription routes them: the per-call sink
 			// takes the AgentProgress shape (no `turns`), else the construction-time sink. A throwing
 			// sink is contained (child engine parity): observation must never reject the prompt, escape
@@ -890,9 +874,10 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			};
 			let contractDef: ContractDef | undefined = requestedDef;
 			let task: string;
+			let runFinished = false;
 			try {
 				unsub = session.subscribe((ev) => {
-					armIdle(); // any event = activity → reset the idle clock
+					if (!runFinished) armIdle(); // any event while running resets the idle clock
 					const toolEvent = applyEvent(state, ev);
 					// Track the open calls so an abandoned one can be closed once the run settles.
 					if (toolEvent) {
@@ -997,22 +982,22 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 					await session.prompt(task);
 					// An abort may have won while prompt() was resolving. Do not start another host wait
 					// after that point; the outer race is already taking us through cleanup.
-					if (!aborted && !timedOut && !hardTimedOut && !startupTimedOut) await session.agent.waitForIdle();
+					if (!cancellationRequested) await session.agent.waitForIdle();
 				};
-				if (aborted || timedOut || hardTimedOut || startupTimedOut) await abortGate;
+					if (cancellationRequested) await abortGate;
 				else await Promise.race([runToIdle(), abortGate]);
 			} catch (e) {
 				thrownError = e instanceof Error ? e.message : String(e);
 				startupContractFailed = e instanceof SelectedSkillsError || e instanceof SessionContractError;
 				resumeRejectedAtStart = e instanceof ResumeContractRejectedAtStart;
 			} finally {
-				// Every exit path, cancellation included, needs the bounded shutdown handshake before an
-				// unsaved transcript can be discarded: only proven quiescence releases its storage. A
-				// watchdog firing during the wait is a no-op once cancellation was requested.
-				if (spec.session) shutdownComplete = await shutdownWithin(session);
+				// Keep receiving tail events while the shutdown handshake uses its own bound to
+				// prove transcript quiescence. The run's deadlines ended when it settled.
+				runFinished = true;
 				disarmIdle();
 				disarmHard();
 				disarmStartup();
+				if (spec.session) shutdownComplete = await shutdownWithin(session);
 				if (signal) signal.removeEventListener("abort", onAbort);
 				unsubBridge?.();
 				releaseHandle();
@@ -1024,7 +1009,7 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			}
 
 			const ok =
-				!aborted && !timedOut && !hardTimedOut && !startupTimedOut && !thrownError && state.stopReason !== "error" && state.stopReason !== "aborted";
+				!cancellationRequested && !thrownError && state.stopReason !== "error" && state.stopReason !== "aborted";
 			// A session torn down mid-flight (abort, timeout, provider throw) never delivers the
 			// tool_execution_end for whatever it was running: pi emits that end only once the tool has
 			// unwound (a macrotask or more later, e.g. bash killing its tree then awaiting close), by which
@@ -1054,19 +1039,13 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			const observed = state.thinkingEffective ?? thinkingEffective;
 			if (observed !== undefined) result.thinkingEffective = observed;
 			// A timeout/abort is the *cause of death* — label it first (mirrors the child engine).
-			if (timedOut) result.error = `${tag} agent timed out — no events for ${watchdogMs}ms (raise this leg's timeoutMs if its tool is legitimately silent)${state.errorMessage ? ` (last error: ${state.errorMessage})` : ""}`;
-			// The deadline cannot tell the two causes apart, so the message names both: claiming
-			// "it never started" would misdirect the operator of a leg that did start and was
-			// simply waiting on a slow first response (mirrors the child engine's wording).
-			else if (startupTimedOut)
-				result.error = `${tag} agent produced no output within the ${startupMs}ms startup window — either it never started (a stalled init) or its first provider response was slower than the window (a queued or rate-limited provider, a cold local model); raise or disable the window with PI_PERSONA_AGENT_STARTUP_MS (0 disables)${state.errorMessage ? ` (last error: ${state.errorMessage})` : ""}`;
-			else if (hardTimedOut) result.error = `${tag} agent exceeded the ${hardMs}ms hard cap${state.errorMessage ? ` (last error: ${state.errorMessage})` : ""}`;
+			if (timeoutError !== undefined) result.error = `${tag} ${timeoutError}`;
 			else if (aborted) result.error = `${tag} agent aborted`;
 			else if (startupContractFailed) result.error = `${tag} ${thrownError}`;
 			else if (state.errorMessage) result.error = `${tag} ${state.errorMessage}`;
 			else if (thrownError) result.error = `${tag} ${thrownError}`;
 			else if (!ok) result.error = `${tag} agent failed (${state.stopReason ?? "unknown"})`;
-			const hostModuleHint = !ok ? piHostModuleHint(state.errorMessage ?? thrownError ?? "") : undefined;
+			const hostModuleHint = !ok ? piHostModuleHint(timeoutError ?? state.errorMessage ?? thrownError ?? "") : undefined;
 			if (hostModuleHint && result.error) result.error += ` — ${hostModuleHint}`;
 			// Classify the failure so the fallback decorator can reroute ONLY provider errors,
 			// never an abort/timeout/hard-cap/agent miss. A stream `error` stop reason is pi's
@@ -1074,7 +1053,7 @@ export function makeInProcessEngine(deps: InProcessDeps): StrategyEngine {
 			// provider fault (bugs and tool failures throw too) — classify by its text.
 			if (!ok)
 				result.failureKind =
-					timedOut || hardTimedOut || startupTimedOut
+					timeoutError !== undefined
 						? "timeout"
 						: aborted
 							? "abort"

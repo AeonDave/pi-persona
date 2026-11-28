@@ -153,6 +153,11 @@ function splitDirs(value: string | undefined): string[] {
 /** Largest delay `setTimeout`/`setInterval` honours; Node coerces anything above it to 1 ms. */
 export const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
+/** A positive override sets the worker deadline. Other values use the configured default. */
+export function isPositiveFiniteMs(value: unknown): value is number {
+	return typeof value === "number" && Number.isFinite(value) && value > 0;
+}
+
 function boundedInteger(value: string | undefined, min: number, max: number): number | undefined {
 	const normalized = value?.trim();
 	if (!normalized || !/^\d+$/.test(normalized)) return undefined;

@@ -1,4 +1,5 @@
 import { after, test } from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 
 // Keep the event loop ref'd for the whole file. Several tests below await a promise
 // resolved only by an UNREF'd timer (the engine's idle / hard-cap / startup watchdogs, which
@@ -14,6 +15,7 @@ import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 
 import type { AgentConfig } from "../../../src/agents/agent.ts";
 import { InProcessBus } from "../../../src/bus/inproc.ts";
+import { MAX_TIMER_DELAY_MS } from "../../../src/core/config.ts";
 import { TerminalResultArchive } from "../../../src/results/archive.ts";
 import { EVIDENCE_GUIDANCE } from "../../../src/core/evidence.ts";
 import { DEFAULT_CONTRACT } from "../../../src/core/contract.ts";
@@ -929,8 +931,63 @@ test("inproc engine idle-kills a session that emits NO events after timeoutMs (t
 	assert.equal(r.ok, false);
 	assert.match(r.error ?? "", /timed out/);
 	assert.match(r.error ?? "", /raise this leg's timeoutMs if its tool is legitimately silent/, "the idle-timeout text names the remedy");
+	assert.doesNotMatch(r.error ?? "", /open tool/, "no tool was observed");
 	assert.match(r.error ?? "", /\[a · stub\/m\]/, "the timeout carries the diagnostic tag");
 });
+
+test("inproc idle timeout reports bounded open tool names before the abort closes them", async () => {
+	const names = ["read", "bash", "external\nlookup", "x".repeat(120), "fourth", "fifth"];
+	const engine = makeInProcessEngine({
+		resolveAgent, contracts, modelRegistry: fakeRegistry, cwd: ".", timeoutMs: 40,
+		createSession: async () => {
+			let emit: (event: unknown) => void = () => {};
+			const end = (toolName: string) => emit({ type: "tool_execution_end", toolCallId: toolName, toolName });
+			return {
+				subscribe: (listener) => { emit = listener; return () => {}; },
+				prompt: async () => {
+					for (const toolName of names) {
+						emit({ type: "tool_execution_start", toolCallId: toolName, toolName, args: { command: "private-argv" } });
+					}
+					end("read");
+				},
+				agent: { abort: () => names.slice(1).forEach(end), waitForIdle: () => new Promise<void>(() => {}), steer: () => {} },
+				dispose: () => {},
+			};
+		},
+	});
+	const result = await engine.run({ agent: "a", task: "probe" });
+	assert.equal(result.failureKind, "timeout");
+	assert.match(result.error ?? "", /no events for 40ms \(open tools at timeout: bash, external-lookup, x{1,80}, \+2 more\)/);
+	assert.doesNotMatch(result.error ?? "", /private-argv|read|fourth|fifth|\n/);
+});
+
+for (const deadline of ["timeoutMs", "hardTimeoutMs", "startupTimeoutMs"] as const) {
+	test(`inproc preserves the stream error known at ${deadline} before Pi aborts`, async () => {
+		const prior = deadline !== "startupTimeoutMs";
+		const report = (errorMessage: string) => ({ type: "message_end", message: { role: "assistant", content: [], errorMessage } });
+		const engine = makeInProcessEngine({
+			resolveAgent, contracts, modelRegistry: fakeRegistry, cwd: ".", [deadline]: 40,
+			createSession: async () => {
+				let emit: (event: unknown) => void = () => {};
+				return {
+					subscribe: (listener) => { emit = listener; return () => {}; },
+					prompt: async () => { if (prior) emit(report("preexisting failure")); },
+					agent: {
+						abort: () => emit(report("This operation was aborted")),
+						waitForIdle: () => new Promise<void>(() => {}), steer: () => {},
+					},
+					dispose: () => {},
+				};
+			},
+		});
+		const result = await engine.run({ agent: "a", task: "deadline evidence" });
+		assert.equal(result.failureKind, "timeout");
+		assert.equal(result.usage.turns, prior ? 2 : 1, "Pi delivered a message during abort");
+		if (prior) assert.match(result.error ?? "", /last error: preexisting failure/);
+		else assert.doesNotMatch(result.error ?? "", /last error/);
+		assert.doesNotMatch(result.error ?? "", /This operation was aborted/);
+	});
+}
 
 test("inproc engine closes a tool abandoned by an abort (the late end is lost with the subscription)", async () => {
 	// pi DOES emit tool_execution_end for an aborted call, but only once the tool has
@@ -1180,6 +1237,38 @@ test("inproc engine's spec.timeoutMs overrides the engine-level idle timeout for
 	assert.equal(r.ok, false);
 	assert.match(r.error ?? "", /timed out/);
 });
+
+const longTimeoutMs = MAX_TIMER_DELAY_MS + 1;
+const longWatchdogCases = [
+	{ name: "per-leg idle window", deps: { timeoutMs: 5_000 }, spec: { timeoutMs: longTimeoutMs } },
+	{ name: "default idle window", deps: { timeoutMs: longTimeoutMs }, spec: {} },
+	{ name: "hard cap", deps: { hardTimeoutMs: longTimeoutMs }, spec: {} },
+	{ name: "startup deadline", deps: { startupTimeoutMs: longTimeoutMs }, spec: {} },
+];
+
+for (const { name, deps, spec } of longWatchdogCases) {
+	test(`inproc engine honors a ${name} beyond the native timer limit`, async () => {
+		const spy: Spy = {};
+		const engine = makeInProcessEngine({
+			resolveAgent, contracts, modelRegistry: fakeRegistry, cwd: ".",
+			...deps,
+			createSession: async () => {
+				const session = fakeSession([msgEnd("done")], spy);
+				return {
+					...session,
+					prompt: async (task) => {
+						await delay(25);
+						await session.prompt(task);
+					},
+				};
+			},
+		});
+		const result = await engine.run({ agent: "a", task: "t", ...spec });
+		assert.equal(spy.aborted, undefined, result.error);
+		assert.equal(result.ok, true, result.error);
+		assert.equal(result.output, "done");
+	});
+}
 
 test("inproc engine ignores a non-positive spec.timeoutMs override (falls back to the engine-level default)", async () => {
 	// deps-level idle timeout is short; the per-leg override is junk (≤0) and must be ignored.
@@ -1782,6 +1871,7 @@ test("inproc initialization deadline settles while a pending factory keeps the g
 		assert.equal(r.failureKind, "timeout");
 		assert.equal(r.modelUsed, "stub/m");
 		assert.equal(initSignalAborted, true, "the factory receives cancellation");
+		assert.match(r.error ?? "", /startup window while initializing the session.*PI_PERSONA_AGENT_STARTUP_MS/);
 		assert.equal(process.env.PI_PERSONA_DISABLE, "1", "the guard remains while the factory is unresolved");
 		assert.deepEqual(bus.participants(), ["supervisor"], "the run releases its bus handle on timeout");
 
@@ -2164,6 +2254,8 @@ test("coaching initialization has an idle deadline even when the startup deadlin
 		t.mock.timers.tick(25);
 		await new Promise<void>((resolve) => setImmediate(resolve));
 		assert.equal(result?.failureKind, "timeout", "coaching cannot block on a supervisor before it exists");
+		assert.match(result.error ?? "", /during session initialization.*no events for 25ms.*timeoutMs/);
+		assert.doesNotMatch(result.error ?? "", /open tool/);
 	} finally {
 		resolveInit(fakeSession([msgEnd("done")]));
 		await run;

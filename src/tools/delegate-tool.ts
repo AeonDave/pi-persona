@@ -293,6 +293,9 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 		command: Type.String({ minLength: 1, maxLength: VERIFICATION_MAX_COMMAND_CHARS }),
 		timeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: VERIFICATION_MAX_TIMEOUT_MS })),
 	}, { additionalProperties: false, description: "Optional foreground shell check after this worker succeeds, before exporting its isolated worktree. Requires isolation worktree and bash permission for supervisor and worker. Default deadline 120000 ms. A failed check fails the run and retains recovery files; no automatic retry. Never start background services." });
+	const IdleWindowSchema = Type.Optional(Type.Number({
+		description: `Maximum silence between worker events in ms. For a quiet tool, allow more than its longest expected silence. Omitted or nonpositive uses ${d.RUN_LIMITS.timeoutMs} ms. Set per worker in tasks[].`,
+	}));
 	const DelegateTaskItem = Type.Object({
 		agent: Type.String({ description: 'Agent to run — use "operator" for a dynamic, skill-driven executor' }),
 		task: Type.String({ description: "Self-contained packet: objective, scope, allowed tools, success signal, non-goals" }),
@@ -315,9 +318,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 		mcp: Type.Optional(
 			Type.Boolean({ description: "true = give this sub-agent working MCP tools (runs it on the child engine so pi-mcp-adapter initializes; the default engine leaves MCP tools 'not initialized'). Pass any server session id in the task to share a server-keyed backend's state." }),
 		),
-		timeoutMs: Type.Optional(
-			Type.Number({ description: "Idle window in ms for this worker, reset by any progress. NOT a deadline: a worker that keeps progressing runs past it. A positive value overrides the shared default; zero or negative uses the default." }),
-		),
+		timeoutMs: IdleWindowSchema,
 		writeSet: Type.Optional(WriteSetSchema),
 		verification: Type.Optional(VerificationSchema),
 		outputContract: Type.Optional(Type.String({ description: "Name of an installed output contract (see /doctor; built-in: default). Omit for free-form output — describe the report shape in requiredArtifacts instead." })),
@@ -341,9 +342,7 @@ export function registerDelegateTool(pi: ExtensionAPI, d: DelegateToolDeps): voi
 		mcp: Type.Optional(
 			Type.Boolean({ description: "true = give the single sub-agent working MCP tools (runs it on the child engine; the default engine leaves MCP tools 'not initialized')" }),
 		),
-		timeoutMs: Type.Optional(
-			Type.Number({ description: "Single-mode idle window in ms, reset by any progress. NOT a deadline: a worker that keeps progressing runs past it. A positive value overrides the shared default; zero or negative uses the default." }),
-		),
+		timeoutMs: IdleWindowSchema,
 		writeSet: Type.Optional(WriteSetSchema),
 		verification: Type.Optional(VerificationSchema),
 		outputContract: Type.Optional(Type.String({ description: "Name of an installed output contract (see /doctor; built-in: default). Omit for free-form output — describe the report shape in requiredArtifacts instead." })),

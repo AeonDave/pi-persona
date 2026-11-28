@@ -86,7 +86,9 @@ the shared behavioral prompt layer: [`docs/SPINE.md`](docs/SPINE.md).
   Any event re-arms the idle window (a chatty tool is never killed), but stall credit follows one rule,
   `madeHeadway` (`engine/async.ts`): raw tool-output chunks earn none, so a leg whose tool streams forever
   raises only the operator-only stall card (nothing is killed, the model is not woken). The idle-timeout
-  failure text names the `timeoutMs` remedy.
+  failure text names the `timeoutMs` remedy and snapshots open tool names before cancellation.
+  Long watchdog windows use a monotonic deadline across timer segments. After an in-process run
+  finishes, only the bounded shutdown handshake and explicit cancellation govern teardown.
   Each strategy SDK also gates every `agent()` call through that budget's semaphore, including direct
   `Promise.all` calls; `parallel` overrides cannot raise its concurrency ceiling. Token budgets
   gate admission using completed usage, so already-running legs can overshoot the threshold.

@@ -33,6 +33,55 @@ test("in-process passes the exact session to the factory, awaits shutdown and re
 	} finally { rmSync(cwd, { recursive: true, force: true }); }
 });
 
+for (const deadline of ["idle", "hard"] as const) {
+	test(`in-process ${deadline} deadline ends once the worker is idle, including when shutdown emits events`, async (t) => {
+		const cwd = mkdtempSync(join(tmpdir(), "persona-worker-shutdown-"));
+		const file = join(cwd, "worker.jsonl");
+		let shutdownStarted!: () => void;
+		let finishShutdown!: () => void;
+		const started = new Promise<void>((resolve) => { shutdownStarted = resolve; });
+		const shutdown = new Promise<void>((resolve) => { finishShutdown = resolve; });
+		let listener: ((event: unknown) => void) | undefined;
+		let aborts = 0;
+		t.mock.timers.enable({ apis: ["setTimeout"] });
+		try {
+			const engine = makeInProcessEngine({
+				cwd,
+				resolveAgent: () => ({ name: "a", source: "test", systemPrompt: "test" }),
+				modelRegistry: { find: () => ({ provider: "test", id: "m" }), getAll: () => [] } as unknown as ModelRegistry,
+				...(deadline === "hard" ? { hardTimeoutMs: 100 } : {}),
+				createSession: async () => {
+					const manager = SessionManager.open(file, undefined, cwd);
+					return {
+						subscribe: (fn) => { listener = fn; return () => {}; },
+						prompt: async (input) => {
+							manager.appendMessage({ role: "user", content: input, timestamp: Date.now() });
+							const message = fauxAssistantMessage("completed");
+							manager.appendMessage(message);
+							listener?.({ type: "message_end", message });
+						},
+						agent: { abort() { aborts++; }, waitForIdle: async () => {}, steer() {} },
+						shutdown: () => { shutdownStarted(); return shutdown; },
+						dispose() {},
+					};
+				},
+			});
+			const pending = engine.run({ agent: "a", task: "first", model: "test/m", session: { file, resume: false },
+				...(deadline === "idle" ? { timeoutMs: 100 } : {}) });
+			await started;
+			listener?.({ type: "agent_end", messages: [] });
+			t.mock.timers.tick(101);
+			finishShutdown();
+			const result = await pending;
+			assert.equal(result.ok, true, result.error);
+			assert.equal(result.output, "completed");
+			assert.equal(result.sessionSaved, true);
+			assert.equal(result.sessionQuiescent, true);
+			assert.equal(aborts, 0);
+		} finally { rmSync(cwd, { recursive: true, force: true }); }
+	});
+}
+
 test("child adapter forwards an exact session path and refuses missing resume before spawn", async () => {
 	const cwd = mkdtempSync(join(tmpdir(), "persona-worker-child-"));
 	const file = join(cwd, "worker.jsonl");

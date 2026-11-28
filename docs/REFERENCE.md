@@ -230,6 +230,17 @@ expandable (`Ctrl+O` by default; `/hotkeys` shows active bindings). `Ctrl+T` tog
 separately. A smaller script output also reduces model context; merely collapsing its card does not.
 No replacement sandbox or renderer is required for this integration.
 
+### Worker idle timeouts
+
+`delegate` allows 180 seconds between worker events by default. An hour-long build that reports
+progress every minute can finish with that default. A quiet tool call can use up the window while
+the underlying job is still running. On timeout the saved diagnostic names any tools observed open.
+
+For a worker expected to be quiet for up to five minutes, for example, set `timeoutMs: 360000`
+on that single delegation or on the specific `tasks[]` entry. The extra minute allows for variability.
+The other workers keep their own windows. Review partial results and the state of any external job
+before deciding whether a failed delegation needs another attempt.
+
 ### Structured results
 
 `outputContract` takes a contract **name**, not an inline shape — `/doctor` lists what's installed.

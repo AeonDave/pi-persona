@@ -11,7 +11,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import type { ThinkingLevel } from "../core/types.ts";
+import { isPositiveFiniteMs } from "../core/config.ts";
 import { applyEvent, type ChildUsage, createStreamState, feedLines, type ProgressSnapshot, snapshot } from "./stream.ts";
+import { armWatchdogTimeout } from "./watchdog-timeout.ts";
+import { deadlineDiagnostic, type WatchdogDeadline } from "./deadline-diagnostic.ts";
 import type { WorkerSession } from "./worker-session.ts";
 
 export interface ChildRunSpec {
@@ -202,10 +205,7 @@ export async function runChildAgent(
 	let stderr = "";
 	let stderrTruncated = false;
 	let aborted = false;
-	let timedOut = false;
-	let hardTimedOut = false;
-	let hardCapMs = 0; // the value that actually armed the hard cap (opts.hardTimeoutMs) — for the error message
-	let startupTimedOut = false;
+	let timeoutError: string | undefined;
 	let killSignal: NodeJS.Signals | undefined; // the signal that ended the child, if any (POSIX)
 	let progressed = false; // set once the child produces its FIRST real progress (turn/tokens/output)
 	let spawnError: Error | undefined;
@@ -265,9 +265,9 @@ export async function runChildAgent(
 			let exited = false; // real liveness: set on 'close' (NOT proc.killed, which is "signal sent")
 			let killing = false;
 			let buffer = "";
-			let timer: ReturnType<typeof setTimeout> | undefined;
-			let hardTimer: ReturnType<typeof setTimeout> | undefined;
-			let startupTimer: ReturnType<typeof setTimeout> | undefined;
+			let disarmIdle: (() => void) | undefined;
+			let disarmHard: (() => void) | undefined;
+			let disarmStartup: (() => void) | undefined;
 			let graceTimer: ReturnType<typeof setTimeout> | undefined;
 			let lastResortTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -301,9 +301,9 @@ export async function runChildAgent(
 			const kill = () => {
 				if (killing) return;
 				killing = true;
-				if (timer) clearTimeout(timer);
-				if (hardTimer) clearTimeout(hardTimer);
-				if (startupTimer) clearTimeout(startupTimer);
+				disarmIdle?.();
+				disarmHard?.();
+				disarmStartup?.();
 				const pid = proc.pid;
 				// POSIX: the child is a process-GROUP leader (detached above), so signal the
 				// whole group — its own tool subprocesses (grandchildren) must die with it,
@@ -359,9 +359,9 @@ export async function runChildAgent(
 			const finish = (code: number) => {
 				if (settled) return;
 				settled = true;
-				if (timer) clearTimeout(timer);
-				if (hardTimer) clearTimeout(hardTimer);
-				if (startupTimer) clearTimeout(startupTimer);
+				disarmIdle?.();
+				disarmHard?.();
+				disarmStartup?.();
 				if (graceTimer) clearTimeout(graceTimer);
 				if (lastResortTimer) clearTimeout(lastResortTimer);
 				if (signal) signal.removeEventListener("abort", onAbort);
@@ -393,20 +393,20 @@ export async function runChildAgent(
 			// (streaming turn/tool events) keeps running.
 			// Hard wall-clock cap: armed ONCE, never re-armed by output — a definite lifetime ceiling
 			// that kills a busy-but-non-converging child the idle window above never catches.
+			const expire = (kind: WatchdogDeadline, ms: number) => {
+				timeoutError = deadlineDiagnostic(kind, ms, "child", openToolCalls, state.errorMessage);
+				kill();
+			};
 			const armHardCap = () => {
-				const capMs = opts.hardTimeoutMs && opts.hardTimeoutMs > 0 ? opts.hardTimeoutMs : 0;
-				if (capMs <= 0 || settled || killing) return;
-				hardCapMs = capMs;
-				hardTimer = setTimeout(() => {
-					hardTimedOut = true;
-					kill();
-				}, capMs);
-				hardTimer.unref?.();
+				const capMs = opts.hardTimeoutMs;
+				if (!isPositiveFiniteMs(capMs) || settled || killing) return;
+				disarmHard = armWatchdogTimeout(() => expire("hard", capMs), capMs);
 			};
 			const armTimeout = () => {
-				if (!opts.timeoutMs || opts.timeoutMs <= 0 || settled || killing) return;
-				if (timer) clearTimeout(timer);
-				timer = setTimeout(() => {
+				const ms = opts.timeoutMs;
+				if (!isPositiveFiniteMs(ms) || settled || killing) return;
+				disarmIdle?.();
+				disarmIdle = armWatchdogTimeout(() => {
 					// The bus, not this local flag, is the source of truth for "still blocked": a
 					// child mid-ask legitimately emits nothing, and only the supervisor's bus knows
 					// whether that ask is still outstanding right now.
@@ -414,10 +414,8 @@ export async function runChildAgent(
 						armTimeout();
 						return;
 					}
-					timedOut = true;
-					kill();
-				}, opts.timeoutMs);
-				timer.unref?.();
+					expire("idle", ms);
+				}, ms);
 			};
 			// Startup deadline: armed ONCE at spawn, cancelled the instant the child makes real
 			// progress. Fires for a child that has produced no assistant output at all (no completed
@@ -426,24 +424,23 @@ export async function runChildAgent(
 			// the difference between a hung init and a first provider response that simply hasn't
 			// arrived, so the window has to be sized for the slowest acceptable cold start.
 			const armStartup = () => {
-				if (!opts.startupTimeoutMs || opts.startupTimeoutMs <= 0 || settled || killing) return;
-				startupTimer = setTimeout(() => {
+				const ms = opts.startupTimeoutMs;
+				if (!isPositiveFiniteMs(ms) || settled || killing) return;
+				disarmStartup = armWatchdogTimeout(() => {
 					if (progressed) return;
 					if (opts.isBlocked?.()) {
 						armStartup();
 						return;
 					}
-					startupTimedOut = true;
-					kill();
-				}, opts.startupTimeoutMs);
-				startupTimer.unref?.();
+					expire("startup", ms);
+				}, ms);
 			};
 			const noteProgress = () => {
 				if (progressed) return;
 				const s = snapshot(state);
 				if (s.turns > 0 || s.tokens > 0 || s.output.length > 0) {
 					progressed = true;
-					if (startupTimer) clearTimeout(startupTimer);
+					disarmStartup?.();
 				}
 			};
 
@@ -523,9 +520,7 @@ export async function runChildAgent(
 
 		const ok =
 			!aborted &&
-			!timedOut &&
-			!hardTimedOut &&
-			!startupTimedOut &&
+			timeoutError === undefined &&
 			!oversizedLine &&
 			!diedWithoutStatus &&
 			exitCode === 0 &&
@@ -541,7 +536,7 @@ export async function runChildAgent(
 			quiescent,
 			// A hard-cap OR startup-deadline kill is a timeout-class death (never a provider reroute) —
 			// surface it via the same flag the idle timeout uses; the errorMessage below says WHICH fired.
-			timedOut: timedOut || hardTimedOut || startupTimedOut,
+			timedOut: timeoutError !== undefined,
 		};
 		if (state.model !== undefined) result.model = state.model;
 		if (state.thinkingEffective !== undefined) result.thinkingEffective = state.thinkingEffective;
@@ -550,15 +545,8 @@ export async function runChildAgent(
 		// it explicitly and fold in any stream-level error rather than letting the
 		// stream message hide why the child actually stopped.
 		const streamErr = state.errorMessage;
-		if (hardTimedOut) {
-			result.errorMessage = `agent exceeded the ${hardCapMs}ms hard cap${streamErr ? ` (last error: ${streamErr})` : ""}`;
-		} else if (startupTimedOut) {
-			// Two readings fit the same evidence and the engine cannot distinguish them, so name
-			// both: claiming "it never started" would misdirect the operator of a leg that did
-			// start and was waiting on a slow first response.
-			result.errorMessage = `agent produced no progress within the ${opts.startupTimeoutMs}ms startup window — either it never started (a stalled init, e.g. an MCP adapter hanging) or its first provider response was slower than the window (a queued or rate-limited provider, a cold local model); raise or disable the window with PI_PERSONA_AGENT_STARTUP_MS (0 disables)${streamErr ? ` (last error: ${streamErr})` : ""}`;
-		} else if (timedOut) {
-			result.errorMessage = `agent timed out — no output for ${opts.timeoutMs}ms (raise this leg's timeoutMs if its tool is legitimately silent)${streamErr ? ` (last error: ${streamErr})` : ""}`;
+		if (timeoutError !== undefined) {
+			result.errorMessage = timeoutError;
 		} else if (aborted) {
 			result.errorMessage = `agent aborted${streamErr ? ` (last error: ${streamErr})` : ""}`;
 		} else if (oversizedLine) {

@@ -291,6 +291,12 @@ child making ZERO progress — no completed turn, no tokens, no streamed output.
 "never started" case the generous idle window is too slow for — notably a headless `mcp: true` leg
 whose `pi-mcp-adapter` hangs on interactive OAuth; the first real progress cancels it.
 
+Both engines schedule long watchdog windows in segments within Node's maximum timer delay,
+measuring elapsed time against a monotonic clock. They capture the last observed error at the
+deadline, before cancellation can replace it. Idle timeouts also capture the open tool names.
+Once an in-process run finishes, its watchdogs are disarmed. Closing a saved session has its own
+bounded shutdown handshake and can still receive an explicit stop.
+
 The idle window and startup deadline stay ARMED for every child, coaching or not — a blind exemption
 that once disabled both while a child could legitimately block on a supervisor reply let a genuinely
 stalled coaching leg run forever. Instead, when either fires, the source of truth is asked directly:
